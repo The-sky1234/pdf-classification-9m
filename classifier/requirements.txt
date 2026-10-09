@@ -1,0 +1,5 @@
+pytest>=8
+# Windows开发仅需Mock；Linux GPU服务器另装：
+# sentence-transformers>=2.2 (BGE-M3 via FlagEmbedding)
+# FlagEmbedding>=1.2
+# paddleocr / mineru 按parser需求

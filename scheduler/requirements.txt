@@ -1,0 +1,2 @@
+pytest>=8
+# 生产/Linux服务器另装：celery[redis], redis

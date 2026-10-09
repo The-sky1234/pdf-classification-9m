@@ -1,0 +1,20 @@
+# Infer worker：BGE-M3 + Reranker + 疑难LLM客户端（CUDA 12.1 / Python3.11；LLM走HTTP，不在容器内放权重）
+FROM nvcr.io/nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 DEBIAN_FRONTEND=noninteractive \
+    HF_HUB_OFFLINE=0
+RUN apt-get update && apt-get install -y --no-install-recommends python3.11 python3-pip libgomp1 \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /srv/app
+COPY scheduler/requirements.txt ./sched-req.txt
+COPY classifier/requirements.txt ./clf-req.txt
+RUN pip3 install -r sched-req.txt -r clf-req.txt torch --index-url https://download.pytorch.org/whl/cu121 \
+ && pip3 install "FlagEmbedding>=1.2" "sentence-transformers>=2.2"
+COPY parser ./parser
+COPY scheduler ./scheduler
+COPY classifier ./classifier
+COPY contracts ./contracts
+COPY deploy/worker_main.py ./deploy_worker_main.py
+RUN useradd -m -u 10001 app && chown -R app /srv/app
+USER app
+ENV WORKER_ROLE=classify
+CMD ["python3", "deploy_worker_main.py"]

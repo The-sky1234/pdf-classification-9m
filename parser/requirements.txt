@@ -1,0 +1,6 @@
+pymupdf>=1.24
+pytest>=8
+# Heavy / GPU deps installed only on Linux server, never required for unit tests:
+# paddleocr>=2.7
+# paddlepaddle-gpu
+# mineru (magic-pdf)

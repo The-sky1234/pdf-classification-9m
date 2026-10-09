@@ -1,0 +1,12 @@
+openapi: 3.0.3
+info: {title: 900万PDF智能分类系统接口契约, version: v1.0-planner}
+paths:
+  /tasks/scan: {post: {summary: 扫描建任务（幂等）, responses: {'202': {description: 已受理}}}}
+  /tasks/{task_id}: {get: {summary: 任务状态查询, responses: {'200': {description: OK}}}}
+  /results: {get: {summary: 分类结果分页查询与筛选, responses: {'200': {description: OK}}}}
+  /results/{id}: {get: {summary: 结果详情（含证据与分数）, responses: {'200': {description: OK}}}}
+  /results/export: {post: {summary: 结果导出（CSV/Excel）, responses: {'200': {description: OK}}}}
+  /review/queue: {get: {summary: 人工复核队列, responses: {'200': {description: OK}}}}
+  /review/{id}: {post: {summary: 复核修正回写, responses: {'200': {description: OK}}}}
+  /taxonomy: {get: {summary: 分类知识库版本与定义查询, responses: {'200': {description: OK}}}}
+components: {}

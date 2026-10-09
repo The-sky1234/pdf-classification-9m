@@ -1,0 +1,63 @@
+# 分类知识库 taxonomy.yaml 说明
+# 严格：4个一级 / 25个二级（7+3+9+6）。IRRELEVANT/MANUAL_REVIEW/FAILED是结果终态，不是类别。
+# status: confirmed=文档已明确；pending_review=草案须专家评审；TBD=待确认，不得当绝对规则。
+taxonomy_version: v1.0-planner
+level1:
+  - id: L1_AQSC
+    name: 安全生产
+    definition: 事前安全监管、行业监管、企业检查、执法、事故调查统计。
+    confusion_note: "事故"不必然属救援；预防监管 vs 救援处置。
+    status: confirmed
+    children:
+      - {id: L2_AQZH, name: 安全生产综合协调, objects: 跨部门/跨行业安全生产工作, actions: 统筹部署、协调督导, exclude: 不把明确专门行业监管都归综合协调, status: pending_review}
+      - {id: L2_XFJG, name: 消防监管, objects: 建筑/场所消防安全、消防设施、火灾隐患, actions: 消防监督、检查、整改, exclude: 区分森林草原火灾防治和一般企业消防, status: pending_review}
+      - {id: L2_ZFGW, name: 安全生产执法和工贸监管, objects: 工贸企业、综合安全执法对象, actions: 执法检查、行政处罚、工贸监管, exclude: 专业危化/石油/矿山事项按职责边界，对象优先还是职能优先待确认, status: TBD}
+      - {id: L2_DCTJ, name: 调查评估和统计, objects: 生产安全事故及其统计数据, actions: 事故调查、责任评估、统计分析, exclude: 区分事故实时指挥救援, status: pending_review}
+      - {id: L2_WHX, name: 危险化学品监管, objects: 危化品企业、化工装置、重大危险源, actions: 许可、检查、隐患排查、监管, exclude: 危化品事故救援按主目的重判, status: pending_review}
+      - {id: L2_SYKT, name: 石油开采安全监管, objects: 油气开采企业、油气田及开采设施, actions: 开采安全监管、作业检查, exclude: 区分一般石化危化品生产/储存, status: pending_review}
+      - {id: L2_KSJC, name: 矿山监管监察, objects: 煤矿、非煤矿山、尾矿库, actions: 矿山安全监察、治理整顿, exclude: 与自然地质灾害监测区分, status: pending_review}
+  - id: L1_YJJY
+    name: 应急救援
+    definition: 预案、救援队伍、突发事件响应、指挥调度。
+    confusion_note: 与安全监管、灾害防治工作区分。
+    status: confirmed
+    children:
+      - {id: L2_YAGL, name: 预案管理, objects: 应急预案、预案体系, actions: 编制、修订、备案、演练计划, exclude: 实际演练/响应主目的须甄别, status: pending_review}
+      - {id: L2_JYLL, name: 救援力量, objects: 应急救援队伍、专业人员与装备, actions: 队伍建设、训练、能力提升, exclude: 与机关队伍管理区分，专业救援培训优先本类待确认, status: TBD}
+      - {id: L2_ZHDD, name: 指挥调度, objects: 突发事件、现场救援行动, actions: 响应启动、任务调度、协同处置, exclude: 与防灾监测、常态预案管理区分, status: pending_review}
+  - id: L1_ZHGL
+    name: 综合管理
+    definition: 机关政策制度、行政办公、人事财务、科技、党建、宣传等。
+    confusion_note: 禁止作为未知文件兜底；专项会议按核心业务归属，不按文种。
+    status: confirmed
+    children:
+      - {id: L2_ZCFG, name: 政策法规, objects: 法律规范、政策制度, actions: 制定、解释、法制审核, exclude: 专业监管政策看文档主导目的, status: pending_review}
+      - {id: L2_ZHBG, name: 综合办公, objects: 机关公文会议、后勤行政, actions: 办文办会、督办、后勤, exclude: 不把全部通知/纪要放此类, status: pending_review}
+      - {id: L2_KJXX, name: 科技和信息化, objects: 信息系统、数据平台、科研项目, actions: 信息化建设、技术管理, exclude: 区分救援指挥业务系统的业务主旨, status: pending_review}
+      - {id: L2_GHCW, name: 规划财务, objects: 预算、经费、财务项目, actions: 规划、拨款、核算、财务管理, exclude: 与救灾物资调拨的救助目的区分，条件待确认, status: TBD}
+      - {id: L2_DJGL, name: 党建管理, objects: 党组织、党员、党建活动, actions: 组织建设、党员教育、廉政建设, exclude: 区分一般人事任免, status: pending_review}
+      - {id: L2_RSGL, name: 人事管理, objects: 岗位、招聘、任免、薪酬, actions: 聘用、考核、职称、人事事务, exclude: 与队伍建设、能力管理区分, status: pending_review}
+      - {id: L2_GJHZ, name: 国际合作, objects: 国外机构、跨境项目、外事, actions: 国际交流、合作、外事管理, exclude: 须真正以国际合作为主, status: pending_review}
+      - {id: L2_DWGL, name: 队伍管理, objects: 机关干部队伍、内部组织队伍, actions: 队伍建设、培训、管理, exclude: 区分应急救援专业力量建设, status: pending_review}
+      - {id: L2_XWXC, name: 新闻宣传, objects: 媒体、新闻发布、宣传项目, actions: 宣传报道、新闻发布、舆情处置, exclude: 专业事项宣传稿按主目的判断，条件待确认, status: TBD}
+  - id: L1_FZZJ
+    name: 防灾减灾救灾
+    definition: 自然灾害监测、防范、减灾、受灾救助与物资保障。
+    confusion_note: 与事故应急调度、消防监管区分。
+    status: confirmed
+    children:
+      - {id: L2_FXJC, name: 风险监测和综合减灾, objects: 自然灾害风险、综合风险普查, actions: 监测、预警、综合减灾评估, exclude: 区分单一灾种专业防治, status: pending_review}
+      - {id: L2_SLFH, name: 森林草原火灾防治, objects: 林地、草原、火险区域, actions: 火险预警、火灾防治, exclude: 按自然灾害对象，不因"防火"归消防监管, status: pending_review}
+      - {id: L2_FXKH, name: 防汛抗旱, objects: 江河汛情、干旱、暴雨洪水, actions: 防汛、抗旱、风险防范, exclude: 实际救援现场指挥看职责与主旨, status: pending_review}
+      - {id: L2_DZZH, name: 地质灾害, objects: 滑坡、泥石流、崩塌、地面塌陷, actions: 监测、防治、治理, exclude: 与矿山生产安全检查区分, status: pending_review}
+      - {id: L2_FZJZ, name: 防震减灾, objects: 地震、地震监测系统, actions: 震情监测、抗震设防、防震科普, exclude: 灾后物资生活救助可能属救灾保障, status: pending_review}
+      - {id: L2_JZWZ, name: 救灾和物资保障, objects: 受灾群众、救灾物资资金, actions: 救助、物资调拨、生活安置, exclude: 与机关一般采购/财务区分，条件待确认, status: TBD}
+result_states: [CLASSIFIED, IRRELEVANT, MANUAL_REVIEW, FAILED]
+confirmed_decisions_2026_10_08:
+  - 单标签制：唯一主责事项，否则MANUAL_REVIEW
+  - 对象/职能冲突：按主责业务与职责边界综合判断
+  - 内部采购/财务/宣传：机构业务归属与主责事项优先（规划财务/新闻宣传/综合办公/科技和信息化/救灾物资保障分流）
+  - 灾害三环节：主要业务目的优先、阶段辅助判断
+  - 验收：balanced折中，数值待首批标注后签署
+pending_confirmations:
+  - 二级定义草案对象优先/职能优先/灾种救援边界须专家评审后生效

@@ -1,0 +1,17 @@
+# OCR worker：PaddleGPU独立环境（CUDA 11.8 / cuDNN8 / Python3.10，Paddle官方基线）
+FROM nvcr.io/nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends python3.10 python3-pip libgomp1 libgl1 \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /srv/app
+COPY scheduler/requirements.txt ./sched-req.txt
+RUN pip3 install -r sched-req.txt "paddlepaddle-gpu==2.6.*" "paddleocr>=2.7" pymupdf
+COPY parser ./parser
+COPY scheduler ./scheduler
+COPY classifier ./classifier
+COPY contracts ./contracts
+COPY deploy/worker_main.py ./deploy_worker_main.py
+RUN useradd -m -u 10001 app && chown -R app /srv/app
+USER app
+ENV WORKER_ROLE=ocr
+CMD ["python3", "deploy_worker_main.py"]

@@ -1,0 +1,239 @@
+# 900万PDF智能分类系统 — 单机GPU服务器编排（未在真实服务器验证，见README_DEPLOY.md）
+name: pdf-classification
+
+services:
+  postgres:
+    image: postgres:16-bookworm
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?required}
+      POSTGRES_USER: ${POSTGRES_USER:?required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ../backend/migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 16G
+    logging:
+      driver: json-file
+      options:
+        max-size: 100m
+        max-file: "5"
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "${REDIS_MAXMEMORY:-4gb}", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 6G
+    logging:
+      driver: json-file
+      options:
+        max-size: 100m
+        max-file: "5"
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:?required}:${POSTGRES_PASSWORD:?required}@postgres:5432/${POSTGRES_DB:?required}
+      API_KEY: ${API_KEY:?required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${API_PORT:-8000}:8000"
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8G
+    logging:
+      driver: json-file
+      options:
+        max-size: 100m
+        max-file: "5"
+
+  parser-worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.api
+    command: ["python", "deploy_worker_main.py"]
+    environment:
+      WORKER_ROLE: parser
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:?required}:${POSTGRES_PASSWORD:?required}@postgres:5432/${POSTGRES_DB:?required}
+      REDIS_URL: redis://redis:6379/0
+      PDF_ROOT: /data/pdfs
+    volumes:
+      - ${PDF_ROOT_HOST:?required}:/data/pdfs:ro
+      - workdata:/data:rw
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      # CPU扩缩容：compose up --scale parser-worker=N（replicas仅swarm有效）
+      resources:
+        limits:
+          cpus: "2"
+          memory: 6G
+    logging:
+      driver: json-file
+      options:
+        max-size: 200m
+        max-file: "5"
+
+  ocr-worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.ocr
+    environment:
+      WORKER_ROLE: ocr
+      NVIDIA_VISIBLE_DEVICES: ${OCR_GPUS:-0,1}
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ${PDF_ROOT_HOST:?required}:/data/pdfs:ro
+      - workdata:/data:rw
+      - modelcache:/root/.paddleocr:rw
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 2
+              capabilities: [gpu]
+        limits:
+          memory: 48G
+    logging:
+      driver: json-file
+      options:
+        max-size: 200m
+        max-file: "5"
+
+  mineru-worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.mineru
+    environment:
+      WORKER_ROLE: mineru
+      NVIDIA_VISIBLE_DEVICES: ${MINERU_GPUS:-2}
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ${PDF_ROOT_HOST:?required}:/data/pdfs:ro
+      - workdata:/data:rw
+      - modelcache:/root/.cache:rw
+      - workdata:/data:rw
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 64G
+    logging:
+      driver: json-file
+      options:
+        max-size: 200m
+        max-file: "5"
+
+  classify-worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.infer
+    environment:
+      WORKER_ROLE: classify
+      NVIDIA_VISIBLE_DEVICES: ${INFER_GPUS:-3}
+      REDIS_URL: redis://redis:6379/0
+      API_URL: ${API_URL:?required}
+      API_KEY: ${API_KEY:?required}
+      BGE_MODEL: ${BGE_MODEL:-BAAI/bge-m3}
+      RERANKER_MODEL: ${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
+      LLM_ENDPOINT: ${LLM_ENDPOINT:?required}
+      LLM_API_KEY: ${LLM_API_KEY:?required}
+    volumes:
+      - modelcache:/root/.cache:rw
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 64G
+    logging:
+      driver: json-file
+      options:
+        max-size: 200m
+        max-file: "5"
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    ports:
+      - "${PROM_PORT:-9090}:9090"
+    restart: unless-stopped
+    profiles: [monitoring]
+
+  dcgm-exporter:
+    image: nvcr.io/nvidia/k8s/dcgm-exporter:3.3.5-3.6.0-ubuntu22.04
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+    ports:
+      - "9400:9400"
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    profiles: [monitoring]
+
+volumes:
+  pgdata:
+  redisdata:
+  modelcache:
+  promdata:
+  workdata:
