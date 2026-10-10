@@ -35,6 +35,9 @@ def _norm_absolute(path: str) -> str:
         raise PathRejected("nul", None, False)
     # 保留大小写，不做 NFC，不把反斜杠换成斜杠。
     norm = posixpath.normpath(path)
+    # normpath 会留下恰好两个前导斜杠。Linux 上它和单斜杠是同一路径。
+    if norm.startswith("//"):
+        norm = "/" + norm[2:]
     if not norm.startswith("/") or norm == "/" or norm.endswith("/"):
         raise PathRejected("not_absolute", None, False)
     return norm

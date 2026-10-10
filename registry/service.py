@@ -133,11 +133,16 @@ def reregister(
     raw_path: str,
     factory: UuidV7Factory | None = None,
 ) -> RegisterOutcome:
-    """重复投递一条已扫路径。不认领批次，不读取 seen。游标不小于该路径时不增加计数。"""
+    """重复投递一条已扫路径。不认领批次，不读取 seen。游标不小于该路径时不增加计数。
+
+    FAILED 或 COMPLETED 时直接拒绝，不登记、不推进游标。续跑必须先释放主人、重开再认领。
+    """
     roots = normalize_roots(source_roots)
     batch = db.batch(batch_no)
     if batch.scan_owner != worker:
         raise ScanBusy(batch_no)
+    if batch.scan_status not in ("RUNNING", "INTERRUPTED"):
+        raise BatchStateError(f"cannot advance status {batch.scan_status}")
     canon = lexical_candidate(raw_path, roots)
     st = lstat_regular(canon)
     return _advance_new_or_existing(db, factory or DEFAULT_FACTORY, batch.id, worker, canon, st)

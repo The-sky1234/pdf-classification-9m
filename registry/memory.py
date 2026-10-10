@@ -113,6 +113,7 @@ class MemoryRegistryDb:
         with self._lock:
             batch = self._batches[batch_no]
             if batch.scan_status in ("RUNNING", "INTERRUPTED") and batch.scan_owner is None:
+                batch.scan_status = "RUNNING"
                 batch.scan_owner = worker
                 return 1
             return 0
@@ -184,6 +185,7 @@ class MemoryRegistryDb:
     ) -> AdvanceResult:
         with self._lock:
             batch = self._require_owner(batch_id, worker)
+            self._require_runnable(batch)
             row, inserted = self._insert_unlocked(file_id, source_path, nbytes, mtime, batch_id)
             advanced = self._advance_unlocked(batch, source_path, skip=False)
             return AdvanceResult(row, inserted, advanced)
@@ -191,6 +193,7 @@ class MemoryRegistryDb:
     def skip_and_advance(self, *, worker: str, batch_id: int, lexical: str) -> bool:
         with self._lock:
             batch = self._require_owner(batch_id, worker)
+            self._require_runnable(batch)
             return self._advance_unlocked(batch, lexical, skip=True)
 
     def set_blocked_path(self, *, worker: str, batch_id: int, blocked_path: str | None) -> None:
@@ -216,11 +219,17 @@ class MemoryRegistryDb:
     def complete(self, *, worker: str, batch_id: int) -> None:
         with self._lock:
             batch = self._require_owner(batch_id, worker)
+            if batch.scan_status != "RUNNING":
+                raise BatchStateError(f"cannot complete status {batch.scan_status}")
             if batch.blocked_path is not None:
                 raise BatchStateError("directory listing error is unresolved")
             batch.scan_status = "COMPLETED"
             batch.scan_owner = None
             batch.last_error = None
+
+    def _require_runnable(self, batch: BatchRecord) -> None:
+        if batch.scan_status not in ("RUNNING", "INTERRUPTED"):
+            raise BatchStateError(f"cannot advance status {batch.scan_status}")
 
     def _require_owner(self, batch_id: int, worker: str) -> BatchRecord:
         batch = self._batches_by_id.get(batch_id)
