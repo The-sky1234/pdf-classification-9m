@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from backend.models import make_engine, make_session, init_db
@@ -7,6 +8,24 @@ from backend import store
 from backend.schemas import ScanRequest, ReviewPatch
 from backend.auth import require_key
 
+
+def _load_local_env() -> None:
+    """读取仓库根目录未跟踪的 .env。已存在的环境变量优先，不记录变量值。"""
+    path = Path(__file__).resolve().parents[1] / ".env"
+    if not path.is_file():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key.isascii() or not key.replace("_", "").isalnum() or key in os.environ:
+            continue
+        os.environ[key] = value.strip().strip('"').strip("'")
+
+
+_load_local_env()
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./dev.db")
 
 

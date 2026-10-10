@@ -1,0 +1,13 @@
+openapi: 3.0.3
+info: {title: Phase1 API v3.0冻结, version: 3.0.0}
+paths:
+  /tasks/scan: {post: {summary: 沿用，返回202}}
+  /tasks/{task_id}: {get: {summary: 含archive_status扩展}}
+  /results: {get: {summary: 沿用+target_path筛选}}
+  /results/{id}: {get: {summary: 含archive/target_path}}
+  /results: {post: {summary: 沿用save_result门禁}}
+  /review/queue: {get: {summary: MANUAL+UNRESOLVED}}
+  /review/{id}: {post: {summary: 支持MANUAL/UNRESOLVED重归档}}
+  /taxonomy: {get: {summary: 返回v3.0 4/27}}
+  /archive/{file_id}: {get: {summary: 新增归档状态查询}}
+# 兼容：旧8路由保留；export仍未实现不列入；新增只加不改。

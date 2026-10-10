@@ -51,6 +51,38 @@ class ClassificationResult(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class ArchiveDecision(Base):
+    __tablename__ = "archive_decisions"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    file_id = Column(String(64), index=True)
+    version = Column(Integer, default=1)
+    archive_type = Column(String(32))
+    level1 = Column(String(32), nullable=True)
+    level2 = Column(String(32), nullable=True)
+    reason = Column(String(32), nullable=True)
+    target_dir = Column(Text, nullable=True)
+    target_file = Column(Text, nullable=True)
+    target_sha256 = Column(String(64), nullable=True)
+    source_sha256 = Column(String(64), nullable=True)
+    approved = Column(Integer, default=0)
+
+
+class ArchiveExecution(Base):
+    __tablename__ = "archive_executions"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    decision_id = Column(Integer, index=True)
+    file_id = Column(String(64), index=True)
+    tmp_path = Column(Text, nullable=True)
+    final_path = Column(Text, nullable=True, unique=True)
+    source_sha256 = Column(String(64), nullable=True)
+    target_sha256 = Column(String(64), nullable=True)
+    bytes_ok = Column(Integer, default=0)
+    sha_ok = Column(Integer, default=0)
+    src_unchanged = Column(Integer, default=0)
+    checksum_verified = Column(Integer, default=0)
+    status = Column(String(32), default="QUEUED", index=True)
+
+
 def make_engine(url: str):
     connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
     return create_engine(url, connect_args=connect_args, future=True)
