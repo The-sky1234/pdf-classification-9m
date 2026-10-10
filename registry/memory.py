@@ -29,6 +29,10 @@ class MissingBatch(Exception):
     pass
 
 
+class BatchStateError(Exception):
+    """批次状态不允许这次转换。不改游标，也不改已登记行。"""
+
+
 @dataclass
 class FileRecord:
     file_id: str
@@ -66,6 +70,7 @@ class BatchRecord:
     skipped_count: int = 0
     scan_owner: str | None = None
     last_error: str | None = None
+    blocked_path: str | None = None
 
 
 @dataclass
@@ -115,6 +120,21 @@ class MemoryRegistryDb:
     def release_owner(self, batch_no: str) -> None:
         with self._lock:
             self._batches[batch_no].scan_owner = None
+
+    def reopen_failed(self, batch_no: str) -> BatchRecord:
+        """FAILED → INTERRUPTED。调用方必须先释放 scan_owner。
+
+        不修改 cursor_path、files_registered、skipped_count、blocked_path，也不改登记行。
+        claim 仍然拒绝 FAILED，避免绕过这次转换直接续跑。
+        """
+        with self._lock:
+            batch = self._batches[batch_no]
+            if batch.scan_owner is not None:
+                raise BatchStateError("release scan_owner before reopening a FAILED batch")
+            if batch.scan_status != "FAILED":
+                raise BatchStateError(f"cannot reopen status {batch.scan_status}")
+            batch.scan_status = "INTERRUPTED"
+            return batch
 
     def batch(self, batch_no: str) -> BatchRecord:
         with self._lock:
@@ -173,11 +193,20 @@ class MemoryRegistryDb:
             batch = self._require_owner(batch_id, worker)
             return self._advance_unlocked(batch, lexical, skip=True)
 
-    def mark_lstat_failed(self, *, worker: str, batch_id: int, lexical: str) -> None:
+    def set_blocked_path(self, *, worker: str, batch_id: int, blocked_path: str | None) -> None:
+        """记录尚未列举成功的最早目录。传 None 表示这次遍历已经列举成功。不改游标。"""
+        with self._lock:
+            batch = self._require_owner(batch_id, worker)
+            batch.blocked_path = blocked_path
+
+    def mark_failed(self, *, worker: str, batch_id: int, last_error: str) -> None:
         with self._lock:
             batch = self._require_owner(batch_id, worker)
             batch.scan_status = "FAILED"
-            batch.last_error = lexical
+            batch.last_error = last_error
+
+    def mark_lstat_failed(self, *, worker: str, batch_id: int, lexical: str) -> None:
+        self.mark_failed(worker=worker, batch_id=batch_id, last_error=lexical)
 
     def interrupt(self, *, worker: str, batch_id: int) -> None:
         with self._lock:
@@ -187,8 +216,11 @@ class MemoryRegistryDb:
     def complete(self, *, worker: str, batch_id: int) -> None:
         with self._lock:
             batch = self._require_owner(batch_id, worker)
+            if batch.blocked_path is not None:
+                raise BatchStateError("directory listing error is unresolved")
             batch.scan_status = "COMPLETED"
             batch.scan_owner = None
+            batch.last_error = None
 
     def _require_owner(self, batch_id: int, worker: str) -> BatchRecord:
         batch = self._batches_by_id.get(batch_id)

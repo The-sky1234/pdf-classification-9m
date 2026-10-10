@@ -4,7 +4,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
-from registry.memory import AdvanceResult, FileIdCollision, FileRecord, MemoryRegistryDb
+from registry.memory import (
+    AdvanceResult,
+    BatchStateError,
+    FileIdCollision,
+    FileRecord,
+    MemoryRegistryDb,
+)
 from registry.paths import (
     LstatFailed,
     PathRejected,
@@ -100,9 +106,22 @@ def scan_batch(
     if db.claim(batch_no, worker) != 1:
         raise ScanBusy(batch_no)
     raws: list[str] = []
+    listing_errors: list[tuple[str, str]] = []
     for root in roots:
-        raws.extend(iter_pdfs(root))
-    return _process(db, batch_no, roots, worker, raws, factory or DEFAULT_FACTORY, stop_after)
+        found, errors = iter_pdfs(root)
+        raws.extend(found)
+        listing_errors.extend(errors)
+    return _process(
+        db,
+        batch_no,
+        roots,
+        worker,
+        raws,
+        factory or DEFAULT_FACTORY,
+        stop_after,
+        listing_errors,
+        walked=True,
+    )
 
 
 def reregister(
@@ -149,8 +168,28 @@ def _require_real_dirs(roots: tuple[str, ...]) -> None:
             raise RetryableScanError(root)
 
 
-def _process(db, batch_no, roots, worker, raws, factory: UuidV7Factory, stop_after) -> ScanSummary:
+def reopen_failed_batch(db: MemoryRegistryDb, batch_no: str):
+    """FAILED → INTERRUPTED。不改游标、已登记 file_id，也不清目录列举屏障。"""
+    return db.reopen_failed(batch_no)
+
+
+def _process(
+    db,
+    batch_no,
+    roots,
+    worker,
+    raws,
+    factory: UuidV7Factory,
+    stop_after,
+    listing_errors=None,
+    walked: bool = False,
+) -> ScanSummary:
     batch = db.batch(batch_no)
+    listing_errors = list(listing_errors or [])
+    if walked:
+        earliest = min((path for path, _reason in listing_errors), key=path_sort_key) if listing_errors else None
+        db.set_blocked_path(worker=worker, batch_id=batch.id, blocked_path=earliest)
+    barrier = db.batch(batch_no).blocked_path
     items = []
     for raw in raws:
         try:
@@ -159,6 +198,9 @@ def _process(db, batch_no, roots, worker, raws, factory: UuidV7Factory, stop_aft
         except PathRejected as rejected:
             items.append((rejected.lexical or raw, rejected))
     items.sort(key=lambda item: path_sort_key(item[0]))
+    if barrier is not None:
+        # 不得把游标推进到未能列举的目录及其后的路径。
+        items = [(key, rejected) for key, rejected in items if path_lt(key, barrier)]
     outcomes: list[RegisterOutcome] = []
     commits = 0
     stopped = False
@@ -177,7 +219,7 @@ def _process(db, batch_no, roots, worker, raws, factory: UuidV7Factory, stop_aft
         try:
             st = lstat_regular(key)
         except LstatFailed as failed:
-            db.mark_lstat_failed(worker=worker, batch_id=batch.id, lexical=failed.lexical)
+            db.mark_failed(worker=worker, batch_id=batch.id, last_error=failed.lexical)
             break
         except PathRejected as rejected:
             if rejected.advance_cursor and rejected.lexical:
@@ -195,7 +237,18 @@ def _process(db, batch_no, roots, worker, raws, factory: UuidV7Factory, stop_aft
             stopped = True
             break
     if not stopped and db.batch(batch_no).scan_status in ("RUNNING", "INTERRUPTED"):
-        db.complete(worker=worker, batch_id=batch.id)
+        blocked = db.batch(batch_no).blocked_path
+        if blocked is not None:
+            if listing_errors:
+                message = "\n".join(
+                    f"{path}: {reason}"
+                    for path, reason in sorted(listing_errors, key=lambda item: path_sort_key(item[0]))
+                )
+            else:
+                message = db.batch(batch_no).last_error or f"{blocked}: directory listing failed"
+            db.mark_failed(worker=worker, batch_id=batch.id, last_error=message)
+        else:
+            db.complete(worker=worker, batch_id=batch.id)
     current = db.batch(batch_no)
     return ScanSummary(
         batch_id=current.id,

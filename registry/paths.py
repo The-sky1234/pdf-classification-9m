@@ -92,11 +92,20 @@ def path_lt(left: str, right: str) -> bool:
     return path_sort_key(left) < path_sort_key(right)
 
 
-def iter_pdfs(root: str) -> list[str]:
+def iter_pdfs(root: str) -> tuple[list[str], list[tuple[str, str]]]:
+    """返回 PDF 路径，以及 ``(目录, 原因)`` 形式的列举失败。
+
+    目录符号链接仍然不进入。列举失败只记录，不当成空目录。
+    """
     found: list[str] = []
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+    errors: list[tuple[str, str]] = []
+
+    def onerror(err: OSError) -> None:
+        errors.append((err.filename or root, err.strerror or str(err)))
+
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False, onerror=onerror):
         dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
         for name in filenames:
             if name.lower().endswith(".pdf"):
                 found.append(os.path.join(dirpath, name))
-    return found
+    return found, errors
