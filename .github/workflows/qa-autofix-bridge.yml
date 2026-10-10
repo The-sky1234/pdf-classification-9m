@@ -1,0 +1,47 @@
+# Evaluates a Cursor QA review and, only after a human arms the repository
+# variable, starts the disabled Developer automation through its webhook.
+# This file does not merge and does not set QA_AUTOFIX_MODE.
+name: qa-autofix-bridge
+
+on:
+  pull_request_review:
+    types: [submitted]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number
+        required: true
+        type: string
+      review_id:
+        description: Review id to evaluate. Manual runs always stay in observe mode.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pdf-autofix-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+  cancel-in-progress: false
+
+jobs:
+  bridge:
+    name: evaluate qa verdict
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      vars.QA_AUTOFIX_MODE == 'observe' ||
+      vars.QA_AUTOFIX_MODE == 'armed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out bridge
+        uses: actions/checkout@v4
+
+      - name: Decide whether a fix may start
+        env:
+          QA_AUTOFIX_MODE: ${{ vars.QA_AUTOFIX_MODE }}
+          CURSOR_DEVELOPER_WEBHOOK_URL: ${{ secrets.CURSOR_DEVELOPER_WEBHOOK_URL }}
+          CURSOR_DEVELOPER_WEBHOOK_TOKEN: ${{ secrets.CURSOR_DEVELOPER_WEBHOOK_TOKEN }}
+        run: python automations/qa_loop/bridge.py
