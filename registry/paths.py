@@ -68,7 +68,33 @@ def _under_root(canon: str, roots: tuple[str, ...]) -> bool:
     return any(canon.startswith(root + "/") for root in roots)
 
 
-def lstat_regular(canon: str):
+def _reject_symlink_ancestors(canon: str, roots: tuple[str, ...]) -> None:
+    """只检查源根及其下的父目录。中间目录符号链接不跟随。"""
+    for root in roots:
+        prefix = root + "/"
+        if not canon.startswith(prefix):
+            continue
+        try:
+            root_stat = os.lstat(root)
+        except OSError:
+            return
+        if stat.S_ISLNK(root_stat.st_mode):
+            raise PathRejected("symlink", canon, True)
+        current = root
+        for part in canon[len(prefix):].split("/")[:-1]:
+            current = f"{current}/{part}"
+            try:
+                st = os.lstat(current)
+            except OSError:
+                return
+            if stat.S_ISLNK(st.st_mode):
+                raise PathRejected("symlink", canon, True)
+        return
+
+
+def lstat_regular(canon: str, roots: tuple[str, ...] | None = None):
+    if roots:
+        _reject_symlink_ancestors(canon, roots)
     try:
         st = os.lstat(canon)
     except OSError as exc:

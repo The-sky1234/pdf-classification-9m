@@ -186,6 +186,7 @@ class MemoryRegistryDb:
         with self._lock:
             batch = self._require_owner(batch_id, worker)
             self._require_runnable(batch)
+            self._reject_blocked(batch, source_path)
             row, inserted = self._insert_unlocked(file_id, source_path, nbytes, mtime, batch_id)
             advanced = self._advance_unlocked(batch, source_path, skip=False)
             return AdvanceResult(row, inserted, advanced)
@@ -194,6 +195,7 @@ class MemoryRegistryDb:
         with self._lock:
             batch = self._require_owner(batch_id, worker)
             self._require_runnable(batch)
+            self._reject_blocked(batch, lexical)
             return self._advance_unlocked(batch, lexical, skip=True)
 
     def set_blocked_path(self, *, worker: str, batch_id: int, blocked_path: str | None) -> None:
@@ -214,6 +216,8 @@ class MemoryRegistryDb:
     def interrupt(self, *, worker: str, batch_id: int) -> None:
         with self._lock:
             batch = self._require_owner(batch_id, worker)
+            if batch.scan_status != "RUNNING":
+                raise BatchStateError(f"cannot interrupt status {batch.scan_status}")
             batch.scan_status = "INTERRUPTED"
 
     def complete(self, *, worker: str, batch_id: int) -> None:
@@ -230,6 +234,12 @@ class MemoryRegistryDb:
     def _require_runnable(self, batch: BatchRecord) -> None:
         if batch.scan_status not in ("RUNNING", "INTERRUPTED"):
             raise BatchStateError(f"cannot advance status {batch.scan_status}")
+
+    def _reject_blocked(self, batch: BatchRecord, canon: str) -> None:
+        from registry.paths import path_lt
+
+        if batch.blocked_path is not None and not path_lt(canon, batch.blocked_path):
+            raise BatchStateError("cannot pass an unlistable directory")
 
     def _require_owner(self, batch_id: int, worker: str) -> BatchRecord:
         batch = self._batches_by_id.get(batch_id)

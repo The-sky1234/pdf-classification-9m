@@ -133,9 +133,11 @@ def reregister(
     raw_path: str,
     factory: UuidV7Factory | None = None,
 ) -> RegisterOutcome:
-    """重复投递一条已扫路径。不认领批次，不读取 seen。游标不小于该路径时不增加计数。
+    """重复投递一条已经扫过的路径。不认领批次，不读取 seen。
 
-    FAILED 或 COMPLETED 时直接拒绝，不登记、不推进游标。续跑必须先释放主人、重开再认领。
+    路径仍严格大于游标时拒绝，避免跳过中间尚未扫描的 PDF。
+    列举屏障尚未清除时，也拒绝屏障上及其后的路径。
+    FAILED 或 COMPLETED 时直接拒绝。续跑必须先释放主人、重开再认领。
     """
     roots = normalize_roots(source_roots)
     batch = db.batch(batch_no)
@@ -144,7 +146,11 @@ def reregister(
     if batch.scan_status not in ("RUNNING", "INTERRUPTED"):
         raise BatchStateError(f"cannot advance status {batch.scan_status}")
     canon = lexical_candidate(raw_path, roots)
-    st = lstat_regular(canon)
+    if batch.cursor_path is None or path_lt(batch.cursor_path, canon):
+        raise BatchStateError("cannot reregister a path ahead of the cursor")
+    if batch.blocked_path is not None and not path_lt(canon, batch.blocked_path):
+        raise BatchStateError("cannot pass an unlistable directory")
+    st = lstat_regular(canon, roots)
     return _advance_new_or_existing(db, factory or DEFAULT_FACTORY, batch.id, worker, canon, st)
 
 
@@ -222,7 +228,7 @@ def _process(
                 break
             continue
         try:
-            st = lstat_regular(key)
+            st = lstat_regular(key, roots)
         except LstatFailed as failed:
             db.mark_failed(worker=worker, batch_id=batch.id, last_error=failed.lexical)
             break
