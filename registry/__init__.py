@@ -1,8 +1,10 @@
 """文件登记：UUIDv7 身份、规范路径、重复扫描幂等。"""
+from registry.memory import ContentRejected, MissingFile
 from registry.service import (
     DEFAULT_FACTORY,
     RegisterOutcome,
     BatchStateError,
+    Registry,
     RetryableScanError,
     ScanBusy,
     ScanSummary,
@@ -17,7 +19,10 @@ from registry.uuidv7 import UuidV7Factory
 __all__ = [
     "DEFAULT_FACTORY",
     "BatchStateError",
+    "ContentRejected",
+    "MissingFile",
     "RegisterOutcome",
+    "Registry",
     "RetryableScanError",
     "ScanBusy",
     "ScanSummary",

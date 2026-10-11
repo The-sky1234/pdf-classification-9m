@@ -24,6 +24,14 @@ class LstatFailed(Exception):
         self.lexical = lexical
 
 
+class StatFailed(Exception):
+    """单个文件 stat 失败。调用方跳过并记错误，不中断整批。"""
+
+    def __init__(self, lexical: str):
+        super().__init__(lexical)
+        self.lexical = lexical
+
+
 def _has_surrogate(path: str) -> bool:
     return any(SURROGATE_MIN <= ord(ch) <= SURROGATE_MAX for ch in path)
 
@@ -90,6 +98,14 @@ def _reject_symlink_ancestors(canon: str, roots: tuple[str, ...]) -> None:
             if stat.S_ISLNK(st.st_mode):
                 raise PathRejected("symlink", canon, True)
         return
+
+
+def stat_regular(canon: str):
+    """跟随链接的 stat。失败只说明这一份文件读不到，不代表整批失败。"""
+    try:
+        return os.stat(canon)
+    except OSError as exc:
+        raise StatFailed(canon) from exc
 
 
 def lstat_regular(canon: str, roots: tuple[str, ...] | None = None):

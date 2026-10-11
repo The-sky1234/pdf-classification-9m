@@ -14,6 +14,7 @@ from registry.memory import (
 from registry.paths import (
     LstatFailed,
     PathRejected,
+    StatFailed,
     canonical_root,
     iter_pdfs,
     lexical_candidate,
@@ -21,6 +22,7 @@ from registry.paths import (
     mtime_utc,
     path_lt,
     path_sort_key,
+    stat_regular,
 )
 from registry.uuidv7 import UuidV7Factory
 
@@ -52,6 +54,7 @@ class ScanSummary:
     skipped_count: int
     last_error: str | None
     outcomes: list[RegisterOutcome]
+    stat_errors: list[str] = field(default_factory=list)
 
 
 def normalize_roots(source_roots: list[str]) -> tuple[str, ...]:
@@ -99,6 +102,7 @@ def scan_batch(
     worker: str,
     factory: UuidV7Factory | None = None,
     stop_after: int | None = None,
+    record_limit: int | None = None,
 ) -> ScanSummary:
     roots = normalize_roots(source_roots)
     _require_real_dirs(roots)
@@ -121,6 +125,7 @@ def scan_batch(
         stop_after,
         listing_errors,
         walked=True,
+        record_limit=record_limit,
     )
 
 
@@ -194,6 +199,7 @@ def _process(
     stop_after,
     listing_errors=None,
     walked: bool = False,
+    record_limit: int | None = None,
 ) -> ScanSummary:
     batch = db.batch(batch_no)
     listing_errors = list(listing_errors or [])
@@ -240,11 +246,23 @@ def _process(
                 stopped = True
                 break
             continue
+        try:
+            st = stat_regular(key)
+        except StatFailed as failed:
+            if db.skip_stat_failure(worker=worker, batch_id=batch.id, lexical=failed.lexical):
+                commits += 1
+            if _pause_for_later(db, batch, worker, items, index, commits, stop_after):
+                stopped = True
+                break
+            continue
         outcome = _advance_new_or_existing(db, factory, batch.id, worker, key, st)
         outcomes.append(outcome)
         if db.batch(batch_no).cursor_path == key:
             commits += 1
         if _pause_for_later(db, batch, worker, items, index, commits, stop_after):
+            stopped = True
+            break
+        if _pause_for_record_limit(db, batch, worker, items, index, outcomes, record_limit):
             stopped = True
             break
     if not stopped and db.batch(batch_no).scan_status in ("RUNNING", "INTERRUPTED"):
@@ -270,7 +288,20 @@ def _process(
         skipped_count=current.skipped_count,
         last_error=current.last_error,
         outcomes=outcomes,
+        stat_errors=list(current.stat_errors),
     )
+
+
+def _pause_for_record_limit(db, batch, worker, items, index, outcomes, record_limit) -> bool:
+    """limit 只限制这次交出的 FileRecord 数。后面还有候选才把批次停成 INTERRUPTED。"""
+    if record_limit is None or len(outcomes) < record_limit:
+        return False
+    cursor = db.batch(batch.batch_no).cursor_path
+    for key, _rejected in items[index + 1 :]:
+        if cursor is None or path_lt(cursor, key):
+            db.interrupt(worker=worker, batch_id=batch.id)
+            return True
+    return False
 
 
 def _pause_for_later(db, batch, worker, items, index, commits, stop_after) -> bool:
@@ -306,3 +337,75 @@ def _advance_new_or_existing(db, factory: UuidV7Factory, batch_id, worker, canon
             discarded.append(file_id)
         return RegisterOutcome(result.row, result.inserted, discarded)
     raise RuntimeError("UUIDv7 primary-key retries exhausted")
+
+
+class Registry:
+    """进程内登记。scan 只读源目录，交出 FileRecord。不判断类别，不复制文件，不读写 seen。"""
+
+    def __init__(
+        self,
+        db: MemoryRegistryDb | None = None,
+        *,
+        worker: str = "registry",
+        factory: UuidV7Factory | None = None,
+    ):
+        self.db = db or MemoryRegistryDb()
+        self.worker = worker
+        self.factory = factory or DEFAULT_FACTORY
+        self.stat_errors: list[str] = []
+        self._open_batch: dict[str, str] = {}
+        self._seq = 0
+
+    def scan(self, root: str, limit: int = 10000) -> list[FileRecord]:
+        """Registry.scan(root, limit) -> FileRecord 列表。
+
+        同一未完成批次从 cursor_path 之后续扫。批次完成后再次调用会新开批次，
+        读回已有 file_id，不改首次 batch_id。根目录不存在时抛 RetryableScanError。
+        登记不计算字节哈希；内容版本由 confirm_content 在哈希确认后追加。
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+            raise ValueError("limit must be a non-negative int")
+        if limit == 0:
+            return []
+        roots = normalize_roots([root])
+        _require_real_dirs(roots)
+        canon = roots[0]
+        batch_no = self._prepare_batch(canon)
+        summary = scan_batch(
+            self.db,
+            batch_no=batch_no,
+            source_roots=[canon],
+            worker=self.worker,
+            factory=self.factory,
+            record_limit=limit,
+        )
+        if summary.scan_status == "COMPLETED":
+            self._open_batch.pop(canon, None)
+        self.stat_errors = list(summary.stat_errors)
+        return [outcome.row for outcome in summary.outcomes]
+
+    def confirm_content(self, file_id: str, source_sha256: str | None, nbytes: int, mtime, batch_id: int) -> FileRecord:
+        """内容字节哈希变化时只追加 content_version，file_id 保持第一次插入的那一枚。"""
+        row, _appended = self.db.confirm_content(
+            file_id=file_id,
+            source_sha256=source_sha256,
+            nbytes=nbytes,
+            mtime=mtime,
+            batch_id=batch_id,
+        )
+        return row
+
+    def content_versions(self, file_id: str):
+        return self.db.content_versions(file_id)
+
+    def _prepare_batch(self, canon: str) -> str:
+        batch_no = self._open_batch.get(canon)
+        batch = self.db.find_batch(batch_no)
+        if batch is None or batch.scan_status == "COMPLETED":
+            self._seq += 1
+            batch_no = f"scan-{self._seq}"
+            self._open_batch[canon] = batch_no
+            return batch_no
+        if batch.scan_owner == self.worker and batch.scan_status in ("RUNNING", "INTERRUPTED"):
+            self.db.release_owner(batch_no)
+        return batch_no

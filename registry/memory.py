@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 V7_RE = re.compile(
@@ -31,6 +31,17 @@ class MissingBatch(Exception):
 
 class BatchStateError(Exception):
     """批次状态不允许这次转换。不改游标，也不改已登记行。"""
+
+
+class MissingFile(Exception):
+    pass
+
+
+class ContentRejected(Exception):
+    """source_sha256 不是 64 位小写十六进制，或这次确认和当前版本对不上。"""
+
+
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass
@@ -59,6 +70,17 @@ class FileRecord:
 
 
 @dataclass
+class ContentVersion:
+    file_id: str
+    content_version: int
+    source_sha256: str
+    nbytes: int
+    mtime: datetime
+    batch_id: int
+    observed_at: datetime
+
+
+@dataclass
 class BatchRecord:
     id: int
     batch_no: str
@@ -71,6 +93,7 @@ class BatchRecord:
     scan_owner: str | None = None
     last_error: str | None = None
     blocked_path: str | None = None
+    stat_errors: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -87,6 +110,7 @@ class MemoryRegistryDb:
         self._by_id: dict[str, FileRecord] = {}
         self._batches: dict[str, BatchRecord] = {}
         self._batches_by_id: dict[int, BatchRecord] = {}
+        self._versions: dict[str, list[ContentVersion]] = {}
         self._next_batch_id = 1
 
     def ensure_batch(self, batch_no: str, roots: tuple[str, ...]) -> BatchRecord:
@@ -140,6 +164,12 @@ class MemoryRegistryDb:
     def batch(self, batch_no: str) -> BatchRecord:
         with self._lock:
             return self._batches[batch_no]
+
+    def find_batch(self, batch_no: str | None) -> BatchRecord | None:
+        if batch_no is None:
+            return None
+        with self._lock:
+            return self._batches.get(batch_no)
 
     def get_by_path(self, source_path: str) -> FileRecord | None:
         with self._lock:
@@ -212,6 +242,75 @@ class MemoryRegistryDb:
 
     def mark_lstat_failed(self, *, worker: str, batch_id: int, lexical: str) -> None:
         self.mark_failed(worker=worker, batch_id=batch_id, last_error=lexical)
+
+    def skip_stat_failure(self, *, worker: str, batch_id: int, lexical: str) -> bool:
+        """单个文件 stat 失败：记下错误并跳过。不把批次改成 FAILED。"""
+        with self._lock:
+            batch = self._require_owner(batch_id, worker)
+            self._require_runnable(batch)
+            self._reject_blocked(batch, lexical)
+            advanced = self._advance_unlocked(batch, lexical, skip=True)
+            if advanced:
+                batch.stat_errors.append(f"{lexical}: stat failed")
+            return advanced
+
+    def content_versions(self, file_id: str) -> list[ContentVersion]:
+        with self._lock:
+            return list(self._versions.get(file_id, []))
+
+    def confirm_content(
+        self,
+        *,
+        file_id: str,
+        source_sha256: str | None,
+        nbytes: int,
+        mtime: datetime,
+        batch_id: int,
+    ) -> tuple[FileRecord, bool]:
+        """按已算出的文件字节哈希追加 content_version。file_id 与首次 batch_id 不变。
+
+        哈希还没算完时不插入版本，也不改登记行。扫描本身不调用这里。
+        """
+        with self._lock:
+            row = self._by_id.get(file_id)
+            if row is None:
+                raise MissingFile(file_id)
+            if batch_id not in self._batches_by_id:
+                raise MissingBatch(batch_id)
+            if source_sha256 is None or source_sha256 == "":
+                return row, False
+            if SHA256_RE.fullmatch(source_sha256) is None:
+                raise ContentRejected("source_sha256 must be 64 lowercase hex")
+            versions = self._versions.get(file_id)
+            if not versions:
+                self._append_version(row, source_sha256, nbytes, mtime, batch_id, 1)
+                return row, True
+            current = versions[-1]
+            if row.content_version != current.content_version:
+                raise ContentRejected("content_version conflict")
+            if current.source_sha256 == source_sha256:
+                if nbytes != current.nbytes:
+                    return row, False
+                row.mtime = mtime
+                return row, False
+            self._append_version(row, source_sha256, nbytes, mtime, batch_id, current.content_version + 1)
+            return row, True
+
+    def _append_version(self, row: FileRecord, source_sha256: str, nbytes: int, mtime: datetime, batch_id: int, version: int) -> None:
+        observed = ContentVersion(
+            file_id=row.file_id,
+            content_version=version,
+            source_sha256=source_sha256,
+            nbytes=nbytes,
+            mtime=mtime,
+            batch_id=batch_id,
+            observed_at=datetime.now(timezone.utc),
+        )
+        self._versions.setdefault(row.file_id, []).append(observed)
+        row.source_sha256 = source_sha256
+        row.nbytes = nbytes
+        row.mtime = mtime
+        row.content_version = version
 
     def interrupt(self, *, worker: str, batch_id: int) -> None:
         with self._lock:
