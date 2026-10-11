@@ -12,11 +12,17 @@ import re
 import urllib.error
 import urllib.request
 from copy import deepcopy
+from datetime import datetime, timezone
 from typing import Mapping
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 QA_AUTOMATION_ID = "fdc3199e-c4b6-11f1-ac31-5e2d0494121f"
+DEVELOPER_AUTOMATION_ID = "7442224a-c4bd-11f1-ac31-5e2d0494121f"
 MAX_AUTOFIX_ROUNDS = 3
-WEBHOOK_PREFIX = "https://api2.cursor.sh/automations/webhook/"
+MAX_COMMENT_PAGES = 50
+WEBHOOK_HOST = "api2.cursor.sh"
+WEBHOOK_PATH_RE = re.compile(r"/automations/webhook/[A-Za-z0-9-]+")
+GITHUB_API = "https://api.github.com"
 CURSOR_LOGINS = frozenset({"cursor[bot]", "cursor"})
 ACTIONS_LOGIN = "github-actions[bot]"
 RESULTS = frozenset({"PASS", "FAIL", "NOT VERIFIED"})
@@ -79,17 +85,33 @@ def initial_state(pr: int) -> dict:
         "last_review_id": None,
         "last_event_at": None,
         "stopped_reason": None,
+        "dispatch_confirmed": True,
     }
 
 
 def validate_webhook_url(url: str) -> str:
-    """Return a Cursor automation webhook URL, or raise ValueError."""
+    """Return a Cursor automation webhook URL, or raise ValueError.
+
+    The path must be a single webhook id. Dot segments, queries, and
+    userinfo are rejected so a secret cannot be aimed at another route.
+    """
     cleaned = url.strip()
-    if cleaned != url or not cleaned.startswith(WEBHOOK_PREFIX):
+    if cleaned != url or not cleaned:
         raise ValueError("webhook URL must be the Cursor automations endpoint")
-    if not cleaned[len(WEBHOOK_PREFIX) :].strip("/"):
-        raise ValueError("webhook URL is missing an automation id")
-    return cleaned
+    parts = urlsplit(cleaned)
+    if (
+        parts.scheme != "https"
+        or parts.netloc != WEBHOOK_HOST
+        or parts.query
+        or parts.fragment
+        or parts.username
+        or parts.password
+    ):
+        raise ValueError("webhook URL must be the Cursor automations endpoint")
+    path = parts.path
+    if "\\" in path or ".." in path.split("/") or not WEBHOOK_PATH_RE.fullmatch(path):
+        raise ValueError("webhook URL path is not a single automation webhook")
+    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 
 def normalize_token(token: str) -> str:
@@ -100,24 +122,30 @@ def normalize_token(token: str) -> str:
     return cleaned
 
 
+def _outside_fences(body: str) -> str:
+    """Drop fenced examples so a quoted format block cannot change the verdict."""
+    return re.sub(r"```.*?```", "", body or "", flags=re.DOTALL)
+
+
 def parse_qa_review(body: str) -> dict:
     """Extract the QA result and automation id from a review body.
 
     The GitHub event supplies the commit SHA. A machine-readable tag wins
     over the heading; if both exist they must agree.
     """
-    automation_ids = AUTOMATION_RE.findall(body or "")
+    visible = _outside_fences(body or "")
+    automation_ids = AUTOMATION_RE.findall(visible)
     if QA_AUTOMATION_ID not in automation_ids:
         raise VerdictError("not_qa_automation")
     if any(item.lower() != QA_AUTOMATION_ID for item in automation_ids):
         raise VerdictError("mixed_automation")
 
-    headings = HEADING_RE.findall(body or "")
+    headings = HEADING_RE.findall(visible)
     heading_result = headings[0] if len(set(headings)) == 1 and headings else None
     if headings and heading_result is None:
         raise VerdictError("conflicting_headings")
 
-    machine = VERDICT_RE.search(body or "")
+    machine = VERDICT_RE.search(visible)
     machine_result = None
     machine_sha = None
     if machine:
@@ -147,10 +175,22 @@ def parse_qa_review(body: str) -> dict:
 
 
 def parse_done_marker(body: str) -> dict:
-    """Extract a Developer completion marker. QA verdicts are not completions."""
-    if AUTOMATION_RE.search(body or "") or VERDICT_RE.search(body or ""):
+    """Extract a Developer completion marker. QA verdicts are not completions.
+
+    Cursor prepends ``CURSOR_AUTOMATION_ID`` to the comment. Only the
+    Developer automation id is a completion; the QA id and any other id are not.
+    """
+    visible = _outside_fences(body or "")
+    if VERDICT_RE.search(visible):
         raise VerdictError("done_mixed_with_qa")
-    match = DONE_RE.search(body or "")
+    automation_ids = [item.lower() for item in AUTOMATION_RE.findall(visible)]
+    if any(item == QA_AUTOMATION_ID for item in automation_ids):
+        raise VerdictError("done_mixed_with_qa")
+    if not automation_ids:
+        raise VerdictError("missing_developer_automation")
+    if any(item != DEVELOPER_AUTOMATION_ID for item in automation_ids):
+        raise VerdictError("foreign_developer_automation")
+    match = DONE_RE.search(visible)
     if not match:
         raise VerdictError("missing_done_marker")
     try:
@@ -211,6 +251,9 @@ def load_state(payload: Mapping | None, pr: int) -> dict:
         raise VerdictError("state_corrupt")
     if (pending is None) != (pending_result is None):
         raise VerdictError("state_corrupt")
+    confirmed = payload.get("dispatch_confirmed", True)
+    if not isinstance(confirmed, bool):
+        raise VerdictError("state_corrupt")
     state.update(
         {
             "pr": pr,
@@ -218,6 +261,7 @@ def load_state(payload: Mapping | None, pr: int) -> dict:
             "in_progress": in_progress,
             "active_run_sha": active,
             "attempted_shas": list(attempted),
+            "dispatch_confirmed": confirmed,
             "pending_sha": pending,
             "pending_result": pending_result,
             "pending_review_id": payload.get("pending_review_id"),
@@ -273,20 +317,14 @@ def interpret_issue_comments(comments: list, pr: int) -> tuple[dict, int | None,
     state = None
     comment_id = None
     done_events: list[dict] = []
+    state_candidates = []
     for comment in comments:
         if not isinstance(comment, Mapping):
             continue
         user = comment.get("user") if isinstance(comment.get("user"), Mapping) else {}
         body = comment.get("body") or ""
-        if state is None and _is_actions_bot(user) and "pdf-autofix-state" in body:
-            try:
-                parsed = state_from_comment(body, pr)
-            except VerdictError as exc:
-                if not exc.args or exc.args[0] != "missing_state":
-                    raise
-            else:
-                state = parsed
-                comment_id = int(comment["id"])
+        if _is_actions_bot(user) and "pdf-autofix-state" in body:
+            state_candidates.append(comment)
         if _is_cursor_bot(user) and "pdf-autofix-done" in body:
             try:
                 parsed_done = parse_done_marker(body)
@@ -301,6 +339,17 @@ def interpret_issue_comments(comments: list, pr: int) -> tuple[dict, int | None,
                     **parsed_done,
                 }
             )
+    for comment in sorted(state_candidates, key=lambda item: int(item["id"]), reverse=True):
+        body = comment.get("body") or ""
+        try:
+            parsed = state_from_comment(body, pr)
+        except VerdictError as exc:
+            if not exc.args or exc.args[0] != "missing_state":
+                raise
+            continue
+        state = parsed
+        comment_id = int(comment["id"])
+        break
     if state is None:
         state = initial_state(pr)
     return state, comment_id, done_events
@@ -317,7 +366,7 @@ def _matching_done(state: Mapping, event: Mapping) -> bool:
 def apply_recorded_done(state: Mapping, done_events: list[dict]) -> dict:
     """Apply Cursor completion comments that match the active run, oldest first."""
     current = load_state(state, int(state["pr"]))
-    ordered = sorted(done_events, key=lambda item: str(item.get("submitted_at") or ""))
+    ordered = sorted(done_events, key=_event_sort_key)
     for event in ordered:
         if not current["in_progress"]:
             break
@@ -387,15 +436,44 @@ def _webhook_context(state: Mapping) -> str:
     )
 
 
+def _event_time(value: object) -> datetime | None:
+    """Parse an ISO-8601 timestamp. Fractional seconds sort after whole seconds."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _event_sort_key(event: Mapping):
+    parsed = _event_time(event.get("submitted_at"))
+    if parsed is None:
+        return (1, str(event.get("submitted_at") or ""))
+    return (0, parsed.timestamp())
+
+
+def _is_earlier(submitted: object, previous: object) -> bool:
+    left = _event_time(submitted)
+    right = _event_time(previous)
+    if left is None or right is None:
+        return False
+    return left < right
+
+
 def _guard_event(state: dict, event: Mapping) -> dict | None:
     if event.get("pr") != state["pr"]:
         return _result(state, "ignore", "pr_mismatch", False)
     review_id = event.get("review_id")
     if review_id and review_id == state.get("last_review_id"):
         return _result(state, "ignore", "duplicate_review", False)
-    submitted = event.get("submitted_at")
-    previous = state.get("last_event_at")
-    if submitted and previous and submitted < previous:
+    if _is_earlier(event.get("submitted_at"), state.get("last_event_at")):
         return _result(state, "ignore", "stale_event", False)
     return None
 
@@ -430,21 +508,18 @@ def _apply_verdict(state: dict, event: Mapping) -> dict:
     if machine_sha and machine_sha != sha:
         return _result(state, "ignore", "sha_conflict", False)
 
-    if result == "PASS":
-        state["in_progress"] = False
-        state["active_run_sha"] = None
-        state["stopped_reason"] = "pass"
+    if result in {"PASS", "NOT VERIFIED"}:
+        action = "stop_pass" if result == "PASS" else "pause_not_verified"
+        reason = "qa_pass" if result == "PASS" else "not_verified"
+        state["stopped_reason"] = "pass" if result == "PASS" else "not_verified"
         _clear_pending(state)
         _touch(state, event)
-        return _result(state, "stop_pass", "qa_pass", False)
-
-    if result == "NOT VERIFIED":
-        state["in_progress"] = False
+        if state["in_progress"]:
+            # The Developer run is still the only one allowed to finish.
+            # Opening the lock here let a later FAIL start a second run.
+            return _result(state, action, "active_run_still_open", False)
         state["active_run_sha"] = None
-        state["stopped_reason"] = "not_verified"
-        _clear_pending(state)
-        _touch(state, event)
-        return _result(state, "pause_not_verified", "not_verified", False)
+        return _result(state, action, reason, False)
 
     if (
         state.get("stopped_reason") == "pass"
@@ -456,12 +531,21 @@ def _apply_verdict(state: dict, event: Mapping) -> dict:
         return _result(state, "ignore", "waiting_for_human", False)
 
     if sha in state["attempted_shas"]:
+        if (
+            state["in_progress"]
+            and state.get("active_run_sha") == sha
+            and state.get("dispatch_confirmed") is False
+        ):
+            _touch(state, event)
+            return _result(state, "dispatch", "retry_unconfirmed", True)
         _touch(state, event)
         return _result(state, "ignore", "duplicate_sha", False)
 
     if state["in_progress"]:
-        _remember_pending(state, event)
         _touch(state, event)
+        if state.get("stopped_reason") in {"pass", "not_verified"}:
+            return _result(state, "defer_in_progress", "active_run_still_open", False)
+        _remember_pending(state, event)
         return _result(state, "defer_in_progress", "one_fix_at_a_time", False)
 
     if state["round"] >= MAX_AUTOFIX_ROUNDS:
@@ -481,6 +565,9 @@ def _start_round(state: dict, sha: str) -> None:
     state["active_run_sha"] = sha
     state["attempted_shas"] = [*state["attempted_shas"], sha]
     state["stopped_reason"] = None
+    # A completed decision is confirmed. commit_decision clears the flag on the
+    # claim it writes before the webhook, and sets it again only after success.
+    state["dispatch_confirmed"] = True
     _clear_pending(state)
 
 
@@ -641,8 +728,10 @@ def commit_decision(mode: str, decision: Mapping, store: MemoryStore, webhook: M
         return 0, decision
     if decision["dispatch"]:
         prior = store.load()
+        claim = deepcopy(decision["state"])
+        claim["dispatch_confirmed"] = False
         try:
-            store.save(decision["state"])
+            store.save(claim)
         except SAVE_ERRORS as exc:
             print(f"qa-autofix-bridge could not save state: {exc}")
             withheld = dict(decision)
@@ -654,11 +743,23 @@ def commit_decision(mode: str, decision: Mapping, store: MemoryStore, webhook: M
                 store.save(prior)
             except SAVE_ERRORS as exc:
                 print(f"qa-autofix-bridge could not roll the round back: {exc}")
-                return 1, dict(decision)
+                # The claim stays unconfirmed so a later FAIL for this SHA can post again.
+                stuck = dict(decision)
+                stuck["state"] = store.load()
+                return 1, stuck
             rolled = dict(decision)
             rolled["state"] = store.load()
             return 1, rolled
-        return 0, dict(decision)
+        confirmed = store.load()
+        confirmed["dispatch_confirmed"] = True
+        try:
+            store.save(confirmed)
+        except SAVE_ERRORS as exc:
+            print(f"qa-autofix-bridge could not mark the webhook confirmed: {exc}")
+            return 1, dict(decision)
+        finished = dict(decision)
+        finished["state"] = confirmed
+        return 0, finished
     if decision["action"] in PERSIST_ACTIONS:
         try:
             store.save(decision["state"])
@@ -666,6 +767,30 @@ def commit_decision(mode: str, decision: Mapping, store: MemoryStore, webhook: M
             print(f"qa-autofix-bridge could not save state: {exc}")
             return 1, dict(decision)
     return 0, dict(decision)
+
+
+class _RefuseRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a webhook redirect. urllib would copy Authorization onto it."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(
+            req.full_url,
+            code,
+            "redirect refused",
+            headers,
+            fp,
+        )
+
+
+_REAL_URLOPEN = urllib.request.urlopen
+
+
+def _open_webhook(request: urllib.request.Request, timeout: int = 30):
+    """Open a webhook POST. Tests replace urlopen; production refuses redirects."""
+    if urllib.request.urlopen is not _REAL_URLOPEN:
+        return urllib.request.urlopen(request, timeout=timeout)
+    opener = urllib.request.build_opener(_RefuseRedirect)
+    return opener.open(request, timeout=timeout)
 
 
 def _post_webhook(url: str, token: str, context: str) -> bool:
@@ -683,10 +808,15 @@ def _post_webhook(url: str, token: str, context: str) -> bool:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        with _open_webhook(request, timeout=30) as response:
             raw = response.read().decode("utf-8")
             parsed = json.loads(raw) if raw else {}
-            return response.status == 200 and parsed.get("success") is True
+            status = getattr(response, "status", None)
+            return status == 200 and parsed.get("success") is True
+    except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            return False
+        return False
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError):
         return False
 
@@ -705,17 +835,38 @@ class GithubCommentStore:
         self.saves: list[dict] = []
 
     def load(self) -> dict:
-        comments = self._request(
-            "GET",
-            f"/repos/{self.repo}/issues/{self.pr}/comments?per_page=100&sort=created&direction=desc",
-        )
-        if not isinstance(comments, list):
-            raise VerdictError("state_corrupt")
+        comments = self._list_comments()
         raw, comment_id, done_events = interpret_issue_comments(comments, self.pr)
         self.raw_state = raw
         self.comment_id = comment_id
         self.done_events = done_events
         return apply_recorded_done(raw, done_events)
+
+    def _list_comments(self) -> list:
+        """Read every issue-comment page. A failed page is not an empty PR.
+
+        ``GET /issues/{n}/comments`` ignores ``sort`` and ``direction`` and
+        returns comments in ascending id order. The next page comes from Link.
+        """
+        path = f"/repos/{self.repo}/issues/{self.pr}/comments?per_page=100"
+        collected: list = []
+        seen: set[str] = set()
+        pinned_repo_id: str | None = None
+        for _page in range(MAX_COMMENT_PAGES):
+            if path in seen:
+                raise VerdictError("state_unread")
+            seen.add(path)
+            body, headers = self._open("GET", path)
+            if not isinstance(body, list):
+                raise VerdictError("state_corrupt")
+            collected.extend(body)
+            nxt, pinned_repo_id = _next_comment_path(
+                headers, self.repo, self.pr, pinned_repo_id
+            )
+            if nxt is None:
+                return collected
+            path = nxt
+        raise VerdictError("state_unread")
 
     def save(self, state: Mapping) -> None:
         validated = load_state(state, self.pr)
@@ -736,9 +887,13 @@ class GithubCommentStore:
         self.saves.append(validated)
 
     def _request(self, method: str, path: str, payload: Mapping | None = None):
+        body, _headers = self._open(method, path, payload)
+        return body
+
+    def _open(self, method: str, path: str, payload: Mapping | None = None):
         data = None if payload is None else json.dumps(payload).encode("utf-8")
         request = urllib.request.Request(
-            f"https://api.github.com{path}",
+            f"{GITHUB_API}{path}",
             data=data,
             headers={
                 "Authorization": f"Bearer {self.token}",
@@ -751,7 +906,75 @@ class GithubCommentStore:
         )
         with self.opener(request, timeout=30) as response:
             raw = response.read().decode("utf-8")
-            return json.loads(raw) if raw else {}
+            body = json.loads(raw) if raw else {}
+            headers = getattr(response, "headers", {}) or {}
+            return body, headers
+
+
+LINK_NEXT_RE = re.compile(
+    r"<([^>]+)>\s*;\s*rel=(?:\"next\"|'next'|next)(?=[\s,;>]|$)",
+    re.IGNORECASE,
+)
+
+
+def _header_value(headers, name: str) -> str:
+    if not headers or not hasattr(headers, "get"):
+        return ""
+    return str(headers.get(name) or headers.get(name.lower()) or headers.get(name.title()) or "")
+
+
+def _next_comment_path(
+    headers, repo: str, pr: int, pinned_repo_id: str | None
+) -> tuple[str | None, str | None]:
+    """Return the next comments path, or None when this page is the last.
+
+    GitHub ignores sort and returns ``Link`` URLs under
+    ``/repositories/{id}/issues/{pr}/comments``. Other hosts, repos, and
+    query keys are refused so a bad Link cannot be read as an empty history.
+    """
+    link = _header_value(headers, "Link")
+    if not link:
+        return None, pinned_repo_id
+    match = LINK_NEXT_RE.search(link)
+    if not match:
+        if re.search(r"rel=(?:\"next\"|'next'|next)(?=[\s,;>]|$)", link, re.IGNORECASE):
+            raise VerdictError("state_unread")
+        return None, pinned_repo_id
+    parts = urlsplit(match.group(1).strip())
+    if (
+        parts.scheme != "https"
+        or parts.netloc != "api.github.com"
+        or parts.username
+        or parts.password
+        or parts.fragment
+    ):
+        raise VerdictError("state_unread")
+    path = parts.path.rstrip("/")
+    if "\\" in path or any(segment == ".." for segment in path.split("/")):
+        raise VerdictError("state_unread")
+    expected = f"/repos/{repo}/issues/{pr}/comments"
+    numeric = re.fullmatch(rf"/repositories/(\d+)/issues/{pr}/comments", path)
+    if path == expected:
+        repo_id = pinned_repo_id
+    elif numeric:
+        repo_id = numeric.group(1)
+        if pinned_repo_id is not None and repo_id != pinned_repo_id:
+            raise VerdictError("state_unread")
+    else:
+        raise VerdictError("state_unread")
+    page = None
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        if key == "page":
+            if not value.isdigit() or int(value) < 1:
+                raise VerdictError("state_unread")
+            page = str(int(value))
+        elif key in {"per_page", "sort", "direction"}:
+            continue
+        else:
+            raise VerdictError("state_unread")
+    query = [("page", page)] if page is not None else []
+    query.append(("per_page", "100"))
+    return f"{path}?{urlencode(query)}", repo_id
 
 
 class CursorWebhook:
@@ -884,7 +1107,7 @@ def _events_for_run(done_events: list[dict], trigger: Mapping | None) -> list[di
         trigger.get("review_id") != item.get("review_id") for item in events
     ):
         events.append(dict(trigger))
-    events.sort(key=lambda item: str(item.get("submitted_at") or ""))
+    events.sort(key=_event_sort_key)
     return events
 
 

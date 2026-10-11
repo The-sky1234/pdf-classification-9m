@@ -54,12 +54,10 @@ PR pushed 是 Developer 更新原 PR 之后再次启动独立 QA 的原生路径
 <!-- pdf-qa-verdict: {"schema":1,"result":"FAIL","sha":"<40位头提交>"} -->
 ```
 
-3. 下一行标题必须与 `result` 完全一致，三选一：
+3. 下一行只写一个标题，并且与 `result` 完全一致。不要在同一条评论里写下另外两个标题，包括示例。把下面的 `FAIL` 换成 `PASS` 或 `NOT VERIFIED` 时，删掉这行再写新的一行：
 
 ```text
-## QA 结论：PASS
 ## QA 结论：FAIL
-## QA 结论：NOT VERIFIED
 ```
 
 4. 然后写 PR 编号、分支、SHA、问题、测试证据、是否允许进入下一阶段。

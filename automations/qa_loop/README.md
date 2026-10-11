@@ -61,9 +61,25 @@ printf '%s' '<webhook-api-key>' | gh secret set CURSOR_DEVELOPER_WEBHOOK_TOKEN -
 
 5. 先做下面的观察验证。确认观察结果符合表格后，再把 repository variable `QA_AUTOFIX_MODE` 设为 `armed`，并只在那时启用 Developer 自动化。本变更没有做第 5 步。
 
-`observe` 只打印判断，不写状态评论，不调用 webhook。`armed` 在调用 webhook 之前先把轮次写入 `pdf-autofix-state`；webhook 没有返回 `{"success": true}` 时会把这条状态改回去，轮次不保留。状态写不进去时不会调用 webhook。手动 `workflow_dispatch` 即使变量已经是 `armed` 也强制观察，避免手点一次就启动修复。
+`observe` 只打印判断，不写状态评论，不调用 webhook。`armed` 在调用 webhook 之前先把轮次写入 `pdf-autofix-state`，这条声明的 `dispatch_confirmed` 为 false；webhook 返回 `{"success": true}` 之后才把它改成 true。webhook 被拒绝时会把状态改回去。回滚写入也失败时，未确认的轮次留在评论里，同一 SHA 的下一次 FAIL 只重试这一轮，不再加一轮。状态写不进去时不会调用 webhook。手动 `workflow_dispatch` 即使变量已经是 `armed` 也强制观察，避免手点一次就启动修复。
 
-状态评论只认 `github-actions[bot]`。其他作者的评论即使带有 `pdf-autofix-state` 也不会被采用；只有这几个字、没有合法 JSON 的评论会被跳过，不会挡住更早的 Actions 状态。`cursor[bot]` 已经写在 PR 上的 `pdf-autofix-done` 会在下一次运行时对账，包括触发事件本身不是完成标记的情况。这样，完成事件若还在排队就被同一并发组里的后一条评论取消，后一次运行仍能打开锁。
+状态评论只认 `github-actions[bot]`。其他作者的评论即使带有 `pdf-autofix-state` 也不会被采用；只有这几个字、没有合法 JSON 的评论会被跳过，不会挡住更早的 Actions 状态。评论接口按 ID 升序分页，`sort` 和 `direction` 会被忽略，所以桥跟随 `Link` 读完每一页。某一页读取失败时整次运行停止，不会把没读到的状态当成第 0 轮。
+
+完成标记必须来自 `cursor[bot]`，并且正文里的 `CURSOR_AUTOMATION_ID` 只能是 Developer 自动化 `7442224a-c4bd-11f1-ac31-5e2d0494121f`。QA 自动化和其他自动化 ID 不能打开锁。
+
+`PASS` 和 `NOT VERIFIED` 在已有修复进行中时不清除 `in_progress`。当前 Developer 结束前，后一个 FAIL 不能再派发。
+
+## 可信版本如何落地
+
+带 webhook 凭证的工作流只检出仓库默认分支 `feature/cloud-development`，再执行那棵树上的 `automations/qa_loop/bridge.py`。它不检出 PR 头提交，也不检出合并提交。评论分页跟随 GitHub 实际返回的 `Link`（`https://api.github.com/repositories/<id>/issues/<pr>/comments`）。其他主机、其他仓库或未知查询参数会让这次运行失败，不会当成没有状态。
+
+默认分支目前还没有这个脚本，也没有这个工作流文件。可信版本只能通过把本 PR 合并进默认分支落地，不能把 checkout 指到 PR。部署前置条件：
+
+1. 把本 PR 合并进 `feature/cloud-development`。合并之前，工作流如果被手动触发，会因为默认分支上没有脚本而失败退出，不会改去执行 PR 里的副本。
+2. 合并后的工作流仍只检出默认分支。后续修桥也要先合并，才能被带凭证的 job 执行。`pull_request_review` 会运行 PR 里的工作流文件，所以只改脚本、不改工作流的 PR 也不会被带凭证的 job 执行。
+3. 仓库变量 `QA_AUTOFIX_MODE` 保持 `observe` 或不设置。本变更不把它写成 `armed`，也不启用 Developer。
+4. 有写权限的协作者仍只有管理员。在第 1 步完成前，不要把写权限授给其他人。能改工作流文件的人可以换掉 checkout，写权限不能扩大。
+5. `observe` 不写状态，也不调用 webhook。只有人工把变量改成 `armed` 之后，才会派发；那一步不在本变更里。
 
 ## 验证
 

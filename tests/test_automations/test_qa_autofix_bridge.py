@@ -2,17 +2,20 @@
 
 import json
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request
 
 import pytest
 
 from automations.qa_loop.bridge import (
+    DEVELOPER_AUTOMATION_ID,
     QA_AUTOMATION_ID,
     CursorWebhook,
     GithubCommentStore,
     MemoryStore,
     MemoryWebhook,
     VerdictError,
+    _post_webhook,
     decide,
     event_from_github,
     execute,
@@ -114,11 +117,17 @@ def test_done_marker_rejects_qa_body_and_unchanged_sha():
         parse_done_marker(done_body(SHA_A, "pushed", SHA_A))
 
 
-def done_body(attempted: str, status: str, pushed: str | None = None) -> str:
+def done_body(attempted: str, status: str, pushed: str | None = None, automation: str | None = None) -> str:
     payload = {"schema": 1, "pr": 1, "attempted_sha": attempted, "status": status}
     if pushed:
         payload["pushed_sha"] = pushed
-    return f"<!-- pdf-autofix-done: {json.dumps(payload)} -->"
+    marker = f"<!-- pdf-autofix-done: {json.dumps(payload)} -->"
+    if automation is False:
+        return marker
+    chosen = DEVELOPER_AUTOMATION_ID if automation is None else automation
+    if not chosen:
+        return marker
+    return f"<!-- CURSOR_AUTOMATION_ID: {chosen} | RUN_ID: bc-developer -->\n{marker}\n"
 
 
 def test_three_rounds_one_active_fix_and_no_repeat_sha():
@@ -173,7 +182,19 @@ def test_pass_waits_for_human_and_not_verified_is_not_pass():
     assert failed["action"] == "dispatch"
     assert failed["state"]["round"] == 1
 
-    passed = decide(failed["state"], verdict("PASS", SHA_B, "p1", "2026-10-10T15:03:00Z"))
+    held = decide(failed["state"], verdict("PASS", SHA_B, "p-hold", "2026-10-10T15:02:30Z"))
+    assert held["action"] == "stop_pass"
+    assert held["dispatch"] is False
+    assert held["state"]["in_progress"] is True
+    assert held["state"]["active_run_sha"] == SHA_A
+    blocked = decide(held["state"], verdict("FAIL", SHA_E, "f-block", "2026-10-10T15:02:40Z"))
+    assert blocked["dispatch"] is False
+    assert blocked["state"]["in_progress"] is True
+    assert blocked["state"]["active_run_sha"] == SHA_A
+
+    cleared = decide(failed["state"], done(SHA_A, "pushed", "d1", "2026-10-10T15:02:45Z", SHA_B))
+    assert cleared["state"]["in_progress"] is False
+    passed = decide(cleared["state"], verdict("PASS", SHA_B, "p1", "2026-10-10T15:03:00Z"))
     assert passed["action"] == "stop_pass"
     assert passed["dispatch"] is False
     assert passed["state"]["in_progress"] is False
@@ -261,6 +282,8 @@ def test_observe_does_not_save_or_call_webhook_and_failed_post_does_not_advance(
     assert code == 0
     assert armed_ok.saves[0]["round"] == 1
     assert armed_ok.saves[0]["in_progress"] is True
+    assert armed_ok.saves[0]["dispatch_confirmed"] is False
+    assert armed_ok.state["dispatch_confirmed"] is True
     assert "不要合并" in armed_decision["webhook_context"]
     assert "生产数据库" in armed_decision["webhook_context"]
 
@@ -282,6 +305,10 @@ def test_webhook_target_and_token_are_constrained():
     assert validate_webhook_url(
         "https://api2.cursor.sh/automations/webhook/fdc3199e-c4b6-11f1-ac31-5e2d0494121f"
     )
+    with pytest.raises(ValueError):
+        validate_webhook_url("https://api2.cursor.sh/automations/webhook/abc/../../v0/me?x=1")
+    with pytest.raises(ValueError):
+        validate_webhook_url("https://api2.cursor.sh/automations/webhook/abc?x=1")
     assert normalize_token("secret\n") == "secret"
     with pytest.raises(ValueError):
         normalize_token("sec ret")
@@ -299,15 +326,21 @@ def test_workflow_is_dormant_and_cannot_merge():
     assert "QA_AUTOFIX_MODE: armed" not in workflow
     assert "workflow_dispatch" in workflow
     assert "vars.QA_AUTOFIX_MODE == 'armed'" in workflow
+    assert "github.event.repository.default_branch" in workflow
+    assert "persist-credentials: false" in workflow
+    assert "refs/pull" not in workflow
+    assert "部署前置条件" in readme
+    assert "feature/cloud-development" in readme
     assert "不合并" in readme
     assert "保持关闭" in developer
     assert "真实 PDF" in developer
 
 
 class _Response:
-    def __init__(self, payload, status=200):
+    def __init__(self, payload, status=200, headers=None):
         self.payload = payload
         self.status = status
+        self.headers = {} if headers is None else headers
 
     def read(self):
         return json.dumps(self.payload).encode()
@@ -340,7 +373,7 @@ def test_runner_idle_and_observe_do_not_post(monkeypatch, tmp_path):
 
     def opener(request: Request, timeout=30):
         calls.append((request.get_method(), request.full_url))
-        if "comments?per_page=100&sort=created&direction=desc" in request.full_url:
+        if "/comments?per_page=100" in request.full_url and "sort=" not in request.full_url:
             return _Response([])
         raise AssertionError(request.full_url)
 
@@ -489,7 +522,7 @@ def test_corrupt_actions_state_fails_closed():
     pr = 2
     comments = [
         _comment(
-            1,
+            5,
             '<!-- pdf-autofix-state\n{"round": 9}\n-->',
             "github-actions[bot]",
             "Bot",
@@ -726,3 +759,352 @@ def test_armed_runs_ignore_forged_state_and_a_later_done_marker(monkeypatch, tmp
     assert api.webhook_posts == 1
     assert _run(monkeypatch, tmp_path, api, later_fail, "pull_request_review") == 0
     assert api.webhook_posts == 1
+
+
+def test_developer_header_opens_the_lock_and_other_automations_do_not():
+    parsed = parse_done_marker(done_body(SHA_A, "pushed", SHA_B))
+    assert parsed["attempted_sha"] == SHA_A
+    assert parsed["pushed_sha"] == SHA_B
+    with pytest.raises(VerdictError, match="missing_developer_automation"):
+        parse_done_marker(done_body(SHA_A, "no_change", automation=""))
+    with pytest.raises(VerdictError, match="foreign_developer_automation"):
+        parse_done_marker(done_body(SHA_A, "no_change", automation="11111111-1111-1111-1111-111111111111"))
+    with pytest.raises(VerdictError, match="done_mixed_with_qa"):
+        parse_done_marker(done_body(SHA_A, "no_change", automation=QA_AUTOMATION_ID))
+
+    pr = 4
+    running = _running_state(pr)
+    comments = [
+        _comment(100, render_state_comment(running), "github-actions[bot]", "Bot", "2026-10-11T01:00:01Z"),
+        _comment(300, done_body(SHA_A, "pushed", SHA_B), "cursor[bot]", "Bot", "2026-10-11T02:00:00Z"),
+    ]
+    opened = _store(comments, pr).load()
+    assert opened["in_progress"] is False
+
+    qa_done = [
+        comments[0],
+        _comment(301, done_body(SHA_A, "pushed", SHA_B, automation=QA_AUTOMATION_ID), "cursor[bot]", "Bot", "2026-10-11T02:00:00Z"),
+    ]
+    assert _store(qa_done, pr).load()["in_progress"] is True
+
+    review = {
+        "review": {
+            "id": 77,
+            "body": done_body(SHA_A, "pushed", SHA_B),
+            "commit_id": SHA_A,
+            "state": "COMMENTED",
+            "submitted_at": "2026-10-11T02:00:00Z",
+            "user": {"login": "cursor[bot]", "type": "Bot"},
+        },
+        "pull_request": {"number": pr},
+    }
+    event = event_from_github(review, "pull_request_review")
+    assert event is not None and event["kind"] == "autofix_done"
+    issue = {
+        "action": "created",
+        "issue": {"number": pr, "pull_request": {}},
+        "comment": {
+            "id": 78,
+            "body": done_body(SHA_A, "no_change"),
+            "created_at": "2026-10-11T02:00:00Z",
+            "user": {"login": "cursor[bot]", "type": "Bot"},
+        },
+    }
+    assert event_from_github(issue, "issue_comment")["kind"] == "autofix_done"
+    issue["comment"]["body"] = done_body(SHA_A, "no_change", automation=QA_AUTOMATION_ID)
+    assert event_from_github(issue, "issue_comment") is None
+    issue["comment"]["user"] = {"login": "attacker", "type": "User"}
+    issue["comment"]["body"] = done_body(SHA_A, "no_change")
+    assert event_from_github(issue, "issue_comment") is None
+
+
+def test_fractional_timestamps_are_not_string_ordered():
+    state = initial_state(1)
+    state["last_event_at"] = "2026-10-11T02:00:00Z"
+    later = decide(state, verdict("FAIL", SHA_A, "r-later", "2026-10-11T02:00:00.500Z"))
+    assert later["action"] == "dispatch"
+    assert later["reason"] != "stale_event"
+
+    newer = initial_state(1)
+    newer["last_event_at"] = "2026-10-11T02:00:00.500Z"
+    earlier = decide(newer, verdict("FAIL", SHA_A, "r-earlier", "2026-10-11T02:00:00Z"))
+    assert earlier["action"] == "ignore"
+    assert earlier["reason"] == "stale_event"
+
+
+def test_fenced_qa_example_does_not_conflict_with_the_verdict():
+    body = qa_body("FAIL") + (
+        "\n```text\n"
+        "## QA 结论：PASS\n"
+        "## QA 结论：FAIL\n"
+        "## QA 结论：NOT VERIFIED\n"
+        "```\n"
+    )
+    assert parse_qa_review(body)["result"] == "FAIL"
+    prompt = (ROOT / "automations/qa_loop/prompts/qa-reviewer.md").read_text(encoding="utf-8")
+    headings = []
+    for line in prompt.splitlines():
+        if line.startswith("## QA 结论：") or line.startswith("## 审查结论："):
+            headings.append(line)
+    assert headings == ["## QA 结论：FAIL"]
+
+
+def test_webhook_redirect_is_refused(monkeypatch):
+    import urllib.error
+    import urllib.request
+
+    calls = []
+
+    def fake_open(request, timeout=30):
+        calls.append(request.full_url)
+        raise urllib.error.HTTPError(request.full_url, 302, "found", hdrs=None, fp=None)
+
+    monkeypatch.setattr("automations.qa_loop.bridge._open_webhook", fake_open)
+    ok = _post_webhook(
+        "https://api2.cursor.sh/automations/webhook/fdc3199e-c4b6-11f1-ac31-5e2d0494121f",
+        "secret",
+        "pdf-autofix-dispatch",
+    )
+    assert ok is False
+    assert calls == [
+        "https://api2.cursor.sh/automations/webhook/fdc3199e-c4b6-11f1-ac31-5e2d0494121f"
+    ]
+    from automations.qa_loop.bridge import _RefuseRedirect
+    import email.message
+
+    handler = _RefuseRedirect()
+    request = urllib.request.Request(
+        "https://api2.cursor.sh/automations/webhook/fdc3199e-c4b6-11f1-ac31-5e2d0494121f"
+    )
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        handler.redirect_request(
+            request,
+            None,
+            302,
+            "found",
+            email.message.EmailMessage(),
+            "https://evil.example/steal",
+        )
+    assert caught.value.code == 302
+    assert caught.value.url == request.full_url
+
+
+def test_unconfirmed_round_is_retried_when_rollback_fails():
+    class FlakyRollback(MemoryStore):
+        def __init__(self):
+            super().__init__(1)
+            self.attempts = 0
+
+        def save(self, state):
+            self.attempts += 1
+            if self.attempts == 2:
+                raise OSError("rollback denied")
+            super().save(state)
+
+    class SecondPost:
+        def __init__(self):
+            self.contexts = []
+
+        def post(self, context):
+            self.contexts.append(context)
+            return len(self.contexts) > 1
+
+    event = verdict("FAIL", SHA_A, "r1", "2026-10-11T01:00:00Z")
+    retry = verdict("FAIL", SHA_A, "r2", "2026-10-11T01:05:00Z")
+    store = FlakyRollback()
+    hook = SecondPost()
+    code, _decision = execute("armed", event, store, hook)
+    assert code == 1
+    assert store.state["round"] == 1
+    assert store.state["in_progress"] is True
+    assert store.state["dispatch_confirmed"] is False
+    assert len(hook.contexts) == 1
+
+    code, decision = execute("armed", retry, store, hook)
+    assert code == 0
+    assert decision["reason"] == "retry_unconfirmed"
+    assert store.state["round"] == 1
+    assert store.state["dispatch_confirmed"] is True
+    assert len(hook.contexts) == 2
+
+
+def test_not_verified_during_an_active_run_keeps_the_lock():
+    started = decide(initial_state(1), verdict("FAIL", SHA_A, "f1", "2026-10-11T01:00:00Z"))
+    paused = decide(started["state"], verdict("NOT VERIFIED", SHA_B, "n1", "2026-10-11T02:00:00Z"))
+    assert paused["action"] == "pause_not_verified"
+    assert paused["dispatch"] is False
+    assert paused["state"]["in_progress"] is True
+    assert paused["state"]["active_run_sha"] == SHA_A
+    nxt = decide(paused["state"], verdict("FAIL", SHA_C, "f2", "2026-10-11T03:00:00Z"))
+    assert nxt["dispatch"] is False
+    assert nxt["state"]["in_progress"] is True
+
+
+class _Pages:
+    def __init__(self, comments, fail_on_page=None, link_mode="github"):
+        self.comments = list(comments)
+        self.fail_on_page = fail_on_page
+        self.link_mode = link_mode
+        self.webhook_posts = 0
+        self.gets = []
+
+    def opener(self, request: Request, timeout=30):
+        url = request.full_url
+        method = request.get_method()
+        if "api2.cursor.sh" in url:
+            self.webhook_posts += 1
+            return _Response({"success": True})
+        if method == "GET" and "/comments" in url:
+            if "sort=" in url:
+                raise AssertionError(url)
+            page = int(parse_qs(urlsplit(url).query).get("page", ["1"])[0])
+            self.gets.append(page)
+            if page == self.fail_on_page:
+                raise OSError("comment page failed")
+            start = (page - 1) * 100
+            chunk = self.comments[start : start + 100]
+            headers = {}
+            if start + 100 < len(self.comments):
+                nxt = page + 1
+                if self.link_mode == "foreign":
+                    headers["Link"] = (
+                        "<https://evil.example/repos/other/repo/issues/8/comments"
+                        f"?page={nxt}>; rel=\"next\""
+                    )
+                elif self.link_mode == "other-repo":
+                    headers["Link"] = (
+                        "<https://api.github.com/repos/other/repo/issues/8/comments"
+                        f"?per_page=100&page={nxt}>; rel=\"next\""
+                    )
+                else:
+                    headers["Link"] = (
+                        "<https://api.github.com/repositories/23096959/issues/8/comments"
+                        f"?per_page=100&page={nxt}>; rel=\"next\", "
+                        "<https://api.github.com/repositories/23096959/issues/8/comments"
+                        f"?per_page=100&page=4>; rel=\"last\""
+                    )
+            return _Response(chunk, headers=headers)
+        payload = json.loads(request.data.decode())
+        if method == "PATCH" and "/issues/comments/" in url:
+            comment_id = int(url.rstrip("/").split("/")[-1])
+            for comment in self.comments:
+                if int(comment["id"]) == comment_id:
+                    comment["body"] = payload["body"]
+                    return _Response({"id": comment_id, "body": payload["body"]})
+            raise OSError(f"missing comment {comment_id}")
+        raise AssertionError(url)
+
+
+def _noise(count: int) -> list[dict]:
+    return [
+        _comment(index, f"note {index}", "someone", "User", "2026-10-11T00:00:00Z")
+        for index in range(1, count + 1)
+    ]
+
+
+def _fail_review(pr: int, review_id: int, sha: str, submitted_at: str) -> dict:
+    return {
+        "review": {
+            "id": review_id,
+            "body": qa_body("FAIL", sha),
+            "commit_id": sha,
+            "state": "COMMENTED",
+            "submitted_at": submitted_at,
+            "user": {"login": "cursor[bot]", "type": "Bot"},
+        },
+        "pull_request": {"number": pr},
+    }
+
+
+def test_state_and_done_markers_past_the_first_page(monkeypatch, tmp_path):
+    pr = 8
+    stopped = _stopped_state(pr)
+    comments = _noise(100)
+    comments.append(
+        _comment(101, render_state_comment(stopped), "github-actions[bot]", "Bot", "2026-10-11T01:00:00Z")
+    )
+    api = _Pages(comments)
+    loaded = GithubCommentStore(
+        "The-sky1234/pdf-classification-9m", pr, "test-token", opener=api.opener
+    ).load()
+    assert loaded["round"] == 3
+    assert loaded["stopped_reason"] == "max_rounds"
+    assert api.gets == [1, 2]
+
+    review = _fail_review(pr, 81, SHA_D, "2026-10-11T03:00:00Z")
+    assert _run(monkeypatch, tmp_path, api, review, "pull_request_review") == 0
+    assert _run(monkeypatch, tmp_path, api, review, "pull_request_review") == 0
+    assert api.webhook_posts == 0
+
+    fresh = initial_state(pr)
+    repeat = _noise(100)
+    repeat.append(
+        _comment(101, render_state_comment(fresh), "github-actions[bot]", "Bot", "2026-10-11T01:00:00Z")
+    )
+    repeat_api = _Pages(repeat)
+    first = _fail_review(pr, 82, SHA_A, "2026-10-11T03:00:00Z")
+    second = _fail_review(pr, 83, SHA_A, "2026-10-11T03:05:00Z")
+    assert _run(monkeypatch, tmp_path, repeat_api, first, "pull_request_review") == 0
+    assert _run(monkeypatch, tmp_path, repeat_api, second, "pull_request_review") == 0
+    assert repeat_api.webhook_posts == 1
+
+    running = _noise(99)
+    running.append(
+        _comment(
+            100,
+            render_state_comment(_running_state(pr)),
+            "github-actions[bot]",
+            "Bot",
+            "2026-10-11T01:00:00Z",
+        )
+    )
+    running.append(
+        _comment(101, done_body(SHA_A, "pushed", SHA_B), "cursor[bot]", "Bot", "2026-10-11T02:00:00Z")
+    )
+    done_api = _Pages(running)
+    found = GithubCommentStore(
+        "The-sky1234/pdf-classification-9m", pr, "test-token", opener=done_api.opener
+    ).load()
+    assert found["in_progress"] is False
+    assert 2 in done_api.gets
+    opened = _fail_review(pr, 84, SHA_B, "2026-10-11T03:00:00Z")
+    again = _fail_review(pr, 85, SHA_B, "2026-10-11T03:05:00Z")
+    assert _run(monkeypatch, tmp_path, done_api, opened, "pull_request_review") == 0
+    assert _run(monkeypatch, tmp_path, done_api, again, "pull_request_review") == 0
+    assert done_api.webhook_posts == 1
+
+
+def test_comment_page_read_failure_does_not_dispatch(monkeypatch, tmp_path):
+    pr = 8
+    api = _Pages(_noise(100) + [_comment(101, "later", "someone", "User", "2026-10-11T01:00:00Z")], fail_on_page=2)
+    with pytest.raises(OSError, match="comment page failed"):
+        GithubCommentStore(
+            "The-sky1234/pdf-classification-9m", pr, "test-token", opener=api.opener
+        ).load()
+    code = _run(
+        monkeypatch,
+        tmp_path,
+        api,
+        _fail_review(pr, 86, SHA_A, "2026-10-11T03:00:00Z"),
+        "pull_request_review",
+    )
+    assert code == 1
+    assert api.webhook_posts == 0
+
+    for mode in ("foreign", "other-repo"):
+        blocked = _Pages(
+            _noise(100) + [_comment(101, "later", "someone", "User", "2026-10-11T01:00:00Z")],
+            link_mode=mode,
+        )
+        with pytest.raises(VerdictError, match="state_unread"):
+            GithubCommentStore(
+                "The-sky1234/pdf-classification-9m", pr, "test-token", opener=blocked.opener
+            ).load()
+        assert _run(
+            monkeypatch,
+            tmp_path,
+            blocked,
+            _fail_review(pr, 87, SHA_A, "2026-10-11T03:00:00Z"),
+            "pull_request_review",
+        ) == 1
+        assert blocked.webhook_posts == 0
