@@ -18,6 +18,7 @@ QA_AUTOMATION_ID = "fdc3199e-c4b6-11f1-ac31-5e2d0494121f"
 MAX_AUTOFIX_ROUNDS = 3
 WEBHOOK_PREFIX = "https://api2.cursor.sh/automations/webhook/"
 CURSOR_LOGINS = frozenset({"cursor[bot]", "cursor"})
+ACTIONS_LOGIN = "github-actions[bot]"
 RESULTS = frozenset({"PASS", "FAIL", "NOT VERIFIED"})
 DONE_STATUSES = frozenset({"pushed", "no_change", "blocked"})
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -55,6 +56,9 @@ PERSIST_ACTIONS = frozenset(
 
 class VerdictError(ValueError):
     """The review body claims to be a QA verdict but cannot be trusted."""
+
+
+SAVE_ERRORS = (OSError, VerdictError, json.JSONDecodeError)
 
 
 def initial_state(pr: int) -> dict:
@@ -237,6 +241,93 @@ def state_from_comment(body: str, pr: int) -> dict:
     except json.JSONDecodeError as exc:
         raise VerdictError("state_corrupt") from exc
     return load_state(payload, pr)
+
+
+def _is_actions_bot(user: Mapping | None) -> bool:
+    """GitHub Actions' GITHUB_TOKEN comments as this login. Users cannot."""
+    if not isinstance(user, Mapping) or user.get("login") != ACTIONS_LOGIN:
+        return False
+    return user.get("type") in (None, "Bot")
+
+
+def _is_cursor_bot(user: Mapping | None) -> bool:
+    if not isinstance(user, Mapping):
+        return False
+    return user.get("type") == "Bot" and user.get("login") in CURSOR_LOGINS
+
+
+def _event_pr(event: Mapping) -> int | None:
+    try:
+        return int(event["pr"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def interpret_issue_comments(comments: list, pr: int) -> tuple[dict, int | None, list[dict]]:
+    """Read trusted state and completion comments. Untrusted text is ignored.
+
+    A comment that only mentions the state marker, without JSON, is skipped
+    so it cannot hide an older Actions comment. Corrupt JSON from Actions
+    still fails closed.
+    """
+    state = None
+    comment_id = None
+    done_events: list[dict] = []
+    for comment in comments:
+        if not isinstance(comment, Mapping):
+            continue
+        user = comment.get("user") if isinstance(comment.get("user"), Mapping) else {}
+        body = comment.get("body") or ""
+        if state is None and _is_actions_bot(user) and "pdf-autofix-state" in body:
+            try:
+                parsed = state_from_comment(body, pr)
+            except VerdictError as exc:
+                if not exc.args or exc.args[0] != "missing_state":
+                    raise
+            else:
+                state = parsed
+                comment_id = int(comment["id"])
+        if _is_cursor_bot(user) and "pdf-autofix-done" in body:
+            try:
+                parsed_done = parse_done_marker(body)
+            except VerdictError:
+                continue
+            done_events.append(
+                {
+                    "kind": "autofix_done",
+                    "pr": pr,
+                    "review_id": f"comment-{comment.get('id')}",
+                    "submitted_at": comment.get("created_at") or "",
+                    **parsed_done,
+                }
+            )
+    if state is None:
+        state = initial_state(pr)
+    return state, comment_id, done_events
+
+
+def _matching_done(state: Mapping, event: Mapping) -> bool:
+    return (
+        bool(state.get("in_progress"))
+        and _event_pr(event) == state.get("pr")
+        and event.get("attempted_sha") == state.get("active_run_sha")
+    )
+
+
+def apply_recorded_done(state: Mapping, done_events: list[dict]) -> dict:
+    """Apply Cursor completion comments that match the active run, oldest first."""
+    current = load_state(state, int(state["pr"]))
+    ordered = sorted(done_events, key=lambda item: str(item.get("submitted_at") or ""))
+    for event in ordered:
+        if not current["in_progress"]:
+            break
+        if not _matching_done(current, event):
+            continue
+        decision = decide(current, event)
+        if decision["action"] == "ignore":
+            continue
+        current = decision["state"]
+    return current
 
 
 def render_state_comment(state: Mapping) -> str:
@@ -450,7 +541,7 @@ def event_from_github(payload: Mapping, event_name: str) -> dict | None:
         review = payload.get("review") or {}
         pull = payload.get("pull_request") or {}
         user = review.get("user") or {}
-        if user.get("type") != "Bot" or user.get("login") not in CURSOR_LOGINS:
+        if not _is_cursor_bot(user):
             return None
         body = review.get("body") or ""
         if "pdf-autofix-done" in body and QA_AUTOMATION_ID not in body:
@@ -487,7 +578,7 @@ def event_from_github(payload: Mapping, event_name: str) -> dict | None:
         if "pull_request" not in issue:
             return None
         user = comment.get("user") or {}
-        if user.get("type") != "Bot" or user.get("login") not in CURSOR_LOGINS:
+        if not _is_cursor_bot(user):
             return None
         body = comment.get("body") or ""
         if "pdf-autofix-done" not in body:
@@ -537,16 +628,44 @@ def execute(mode: str, event: Mapping, store: MemoryStore, webhook: MemoryWebhoo
     if mode not in {"observe", "armed"}:
         raise ValueError("mode must be observe or armed")
     decision = decide(store.load(), event)
+    return commit_decision(mode, decision, store, webhook)
+
+
+def commit_decision(mode: str, decision: Mapping, store: MemoryStore, webhook: MemoryWebhook) -> tuple[int, dict]:
+    """Persist a round before posting. A rejected webhook rolls that round back.
+
+    Saving first means a later run cannot post the same SHA again when the
+    comment update fails. A failed POST never leaves the round in place.
+    """
     if mode == "observe":
         return 0, decision
     if decision["dispatch"]:
+        prior = store.load()
+        try:
+            store.save(decision["state"])
+        except SAVE_ERRORS as exc:
+            print(f"qa-autofix-bridge could not save state: {exc}")
+            withheld = dict(decision)
+            withheld["state"] = prior
+            withheld["dispatch"] = False
+            return 1, withheld
         if not webhook.post(decision["webhook_context"]):
-            return 1, decision
-        store.save(decision["state"])
-        return 0, decision
+            try:
+                store.save(prior)
+            except SAVE_ERRORS as exc:
+                print(f"qa-autofix-bridge could not roll the round back: {exc}")
+                return 1, dict(decision)
+            rolled = dict(decision)
+            rolled["state"] = store.load()
+            return 1, rolled
+        return 0, dict(decision)
     if decision["action"] in PERSIST_ACTIONS:
-        store.save(decision["state"])
-    return 0, decision
+        try:
+            store.save(decision["state"])
+        except SAVE_ERRORS as exc:
+            print(f"qa-autofix-bridge could not save state: {exc}")
+            return 1, dict(decision)
+    return 0, dict(decision)
 
 
 def _post_webhook(url: str, token: str, context: str) -> bool:
@@ -581,6 +700,8 @@ class GithubCommentStore:
         self.token = normalize_token(token)
         self.opener = opener or urllib.request.urlopen
         self.comment_id: int | None = None
+        self.raw_state: dict | None = None
+        self.done_events: list[dict] = []
         self.saves: list[dict] = []
 
     def load(self) -> dict:
@@ -590,13 +711,11 @@ class GithubCommentStore:
         )
         if not isinstance(comments, list):
             raise VerdictError("state_corrupt")
-        for comment in comments:
-            body = comment.get("body") or ""
-            if "pdf-autofix-state" not in body:
-                continue
-            self.comment_id = int(comment["id"])
-            return state_from_comment(body, self.pr)
-        return initial_state(self.pr)
+        raw, comment_id, done_events = interpret_issue_comments(comments, self.pr)
+        self.raw_state = raw
+        self.comment_id = comment_id
+        self.done_events = done_events
+        return apply_recorded_done(raw, done_events)
 
     def save(self, state: Mapping) -> None:
         validated = load_state(state, self.pr)
@@ -694,28 +813,79 @@ def run_from_env(environ: Mapping[str, str] | None = None) -> int:
     except (VerdictError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(f"qa-autofix-bridge refused delivery: {exc}")
         return 1
-    if event is None:
+    pr = _delivery_pr(payload, event_name, event)
+    if pr is None:
         print(f"qa-autofix-bridge ignored {event_name}")
         return 0
     try:
         store = GithubCommentStore(
             env["GITHUB_REPOSITORY"],
-            int(event["pr"]),
+            pr,
             env["GITHUB_TOKEN"],
         )
-        state = store.load()
+        store.load()
     except (VerdictError, ValueError, KeyError, OSError, json.JSONDecodeError) as exc:
         print(f"qa-autofix-bridge state unavailable: {exc}")
         return 1
+    if store.raw_state is None:
+        print("qa-autofix-bridge state unavailable: missing raw state")
+        return 1
+    holder = _LoadedStore(deepcopy(store.raw_state), store)
+    events = _events_for_run(store.done_events, event)
+    if not events:
+        print(f"qa-autofix-bridge ignored {event_name}")
+        return 0
     webhook = CursorWebhook(
         env.get("CURSOR_DEVELOPER_WEBHOOK_URL", ""),
         env.get("CURSOR_DEVELOPER_WEBHOOK_TOKEN", ""),
     )
-    code, decision = execute(mode, event, _LoadedStore(state, store), webhook)
-    _print_decision(mode, decision)
-    if code != 0:
-        print("qa-autofix-bridge did not start Developer; state was not advanced")
-    return code
+    for item in events:
+        if item.get("kind") == "autofix_done" and not _matching_done(holder.load(), item):
+            continue
+        try:
+            code, decision = execute(mode, item, holder, webhook)
+        except (VerdictError, ValueError, KeyError, OSError, json.JSONDecodeError) as exc:
+            print(f"qa-autofix-bridge state unavailable: {exc}")
+            return 1
+        if mode == "observe":
+            holder.state = deepcopy(decision["state"])
+        _print_decision(mode, decision)
+        if code != 0:
+            if decision["dispatch"] and decision["state"].get("in_progress"):
+                print("qa-autofix-bridge did not start Developer; the claimed round could not be rolled back")
+            else:
+                print("qa-autofix-bridge did not start Developer; state was not advanced")
+            return code
+    return 0
+
+
+def _delivery_pr(payload: Mapping, event_name: str, event: Mapping | None) -> int | None:
+    if event is not None:
+        return _event_pr(event)
+    if event_name == "issue_comment":
+        issue = payload.get("issue") or {}
+        if "pull_request" not in issue:
+            return None
+        number = issue.get("number")
+    elif event_name == "pull_request_review":
+        number = (payload.get("pull_request") or {}).get("number")
+    else:
+        return None
+    try:
+        return int(number)
+    except (TypeError, ValueError):
+        return None
+
+
+def _events_for_run(done_events: list[dict], trigger: Mapping | None) -> list[dict]:
+    """Replay recorded completions, then the triggering event, in time order."""
+    events = list(done_events)
+    if trigger is not None and all(
+        trigger.get("review_id") != item.get("review_id") for item in events
+    ):
+        events.append(dict(trigger))
+    events.sort(key=lambda item: str(item.get("submitted_at") or ""))
+    return events
 
 
 class _LoadedStore:

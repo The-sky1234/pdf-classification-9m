@@ -9,6 +9,7 @@ import pytest
 from automations.qa_loop.bridge import (
     QA_AUTOMATION_ID,
     CursorWebhook,
+    GithubCommentStore,
     MemoryStore,
     MemoryWebhook,
     VerdictError,
@@ -249,7 +250,9 @@ def test_observe_does_not_save_or_call_webhook_and_failed_post_does_not_advance(
     failed_hook = MemoryWebhook(ok=False)
     code, _ = execute("armed", event, armed, failed_hook)
     assert code == 1
-    assert armed.saves == []
+    assert armed.state["round"] == 0
+    assert armed.state["in_progress"] is False
+    assert armed.state["attempted_shas"] == []
     assert failed_hook.contexts == [decision["webhook_context"]]
 
     armed_ok = MemoryStore(1)
@@ -392,3 +395,334 @@ def test_runner_prints_observe_dispatch_without_network_post(monkeypatch, tmp_pa
     assert '"dispatch": true' in captured
     assert "observe only" in captured
     assert "secret" not in captured
+
+
+def _comment(comment_id: int, body: str, login: str, user_type: str, created_at: str) -> dict:
+    return {
+        "id": comment_id,
+        "body": body,
+        "created_at": created_at,
+        "user": {"login": login, "type": user_type},
+    }
+
+
+def _store(comments: list[dict], pr: int = 2) -> GithubCommentStore:
+    def opener(request: Request, timeout=30):
+        assert request.get_method() == "GET"
+        return _Response(comments)
+
+    return GithubCommentStore(
+        "The-sky1234/pdf-classification-9m",
+        pr,
+        "test-token",
+        opener=opener,
+    )
+
+
+def _stopped_state(pr: int) -> dict:
+    state = initial_state(pr)
+    state["round"] = 3
+    state["stopped_reason"] = "max_rounds"
+    state["attempted_shas"] = [SHA_A, SHA_B, SHA_C]
+    return state
+
+
+def _running_state(pr: int) -> dict:
+    state = initial_state(pr)
+    state["round"] = 1
+    state["in_progress"] = True
+    state["active_run_sha"] = SHA_A
+    state["attempted_shas"] = [SHA_A]
+    state["last_verdict"] = "FAIL"
+    state["last_verdict_sha"] = SHA_A
+    state["last_event_at"] = "2026-10-11T01:00:00Z"
+    return state
+
+
+def test_untrusted_state_comment_cannot_reset_or_hide_the_actions_comment():
+    """A newer human comment must not replace or shadow the Actions bot state."""
+    pr = 2
+    comments = [
+        _comment(
+            201,
+            "请看 pdf-autofix-state，不要手工改 JSON",
+            "attacker",
+            "User",
+            "2026-10-11T02:00:03Z",
+        ),
+        _comment(
+            200,
+            render_state_comment(initial_state(pr)),
+            "attacker",
+            "User",
+            "2026-10-11T02:00:02Z",
+        ),
+        _comment(
+            100,
+            render_state_comment(_stopped_state(pr)),
+            "github-actions[bot]",
+            "Bot",
+            "2026-10-11T02:00:01Z",
+        ),
+    ]
+    store = _store(comments, pr)
+    loaded = store.load()
+    assert loaded["round"] == 3
+    assert loaded["stopped_reason"] == "max_rounds"
+    assert store.comment_id == 100
+
+    bare_actions = [
+        _comment(
+            202,
+            "请看 pdf-autofix-state，不要手工改 JSON",
+            "github-actions[bot]",
+            "Bot",
+            "2026-10-11T02:00:04Z",
+        ),
+        comments[2],
+    ]
+    skipped = _store(bare_actions, pr).load()
+    assert skipped["round"] == 3
+
+
+def test_corrupt_actions_state_fails_closed():
+    pr = 2
+    comments = [
+        _comment(
+            1,
+            '<!-- pdf-autofix-state\n{"round": 9}\n-->',
+            "github-actions[bot]",
+            "Bot",
+            "2026-10-11T02:00:02Z",
+        ),
+        _comment(
+            2,
+            render_state_comment(initial_state(pr)),
+            "github-actions[bot]",
+            "Bot",
+            "2026-10-11T02:00:01Z",
+        ),
+    ]
+    with pytest.raises(VerdictError, match="state_corrupt"):
+        _store(comments, pr).load()
+
+
+def test_recorded_cursor_done_marker_opens_the_lock_for_the_next_fail():
+    pr = 4
+    running = _running_state(pr)
+    comments = [
+        _comment(
+            301,
+            done_body(SHA_A, "pushed", SHA_B),
+            "attacker",
+            "User",
+            "2026-10-11T02:30:00Z",
+        ),
+        _comment(
+            300,
+            done_body(SHA_A, "pushed", SHA_B),
+            "cursor[bot]",
+            "Bot",
+            "2026-10-11T02:00:00Z",
+        ),
+        _comment(
+            100,
+            render_state_comment(running),
+            "github-actions[bot]",
+            "Bot",
+            "2026-10-11T01:00:01Z",
+        ),
+    ]
+    loaded = _store(comments, pr).load()
+    assert loaded["in_progress"] is False
+    assert loaded["active_run_sha"] is None
+    decision = decide(
+        loaded,
+        verdict("FAIL", SHA_B, "r-next", "2026-10-11T03:00:00Z", pr=pr),
+    )
+    assert decision["action"] == "dispatch"
+    assert decision["dispatch"] is True
+    assert decision["state"]["round"] == 2
+
+    human_only = [comments[0], comments[2]]
+    stuck = _store(human_only, pr).load()
+    assert stuck["in_progress"] is True
+    deferred = decide(
+        stuck,
+        verdict("FAIL", SHA_B, "r-human", "2026-10-11T03:00:00Z", pr=pr),
+    )
+    assert deferred["action"] == "defer_in_progress"
+    assert deferred["dispatch"] is False
+
+
+def test_state_save_failure_does_not_call_the_webhook():
+    class DenySave(MemoryStore):
+        def save(self, state):
+            raise OSError("denied")
+
+    event = verdict("FAIL", SHA_A, "r1", "2026-10-10T15:01:00Z")
+    store = DenySave(1)
+    hook = MemoryWebhook(ok=True)
+    code, _decision = execute("armed", event, store, hook)
+    code_again, _again = execute("armed", event, store, hook)
+    assert code == 1
+    assert code_again == 1
+    assert hook.contexts == []
+    assert store.state["round"] == 0
+
+
+def test_rejected_webhook_rolls_the_claimed_round_back():
+    order = []
+
+    class RecordingStore(MemoryStore):
+        def save(self, state):
+            order.append(("save", state["round"], state["in_progress"]))
+            super().save(state)
+
+    class RecordingHook(MemoryWebhook):
+        def post(self, context):
+            order.append(("post", self.ok))
+            return super().post(context)
+
+    event = verdict("FAIL", SHA_A, "r1", "2026-10-10T15:01:00Z")
+    store = RecordingStore(1)
+    hook = RecordingHook(ok=False)
+    code, _decision = execute("armed", event, store, hook)
+    assert code == 1
+    assert store.state["round"] == 0
+    assert store.state["in_progress"] is False
+    assert store.state["attempted_shas"] == []
+    assert order == [("save", 1, True), ("post", False), ("save", 0, False)]
+
+
+class _CommentApi:
+    def __init__(self, comments: list[dict]):
+        self.comments = comments
+        self.webhook_posts = 0
+
+    def opener(self, request: Request, timeout=30):
+        method = request.get_method()
+        url = request.full_url
+        if "api2.cursor.sh" in url:
+            self.webhook_posts += 1
+            return _Response({"success": True})
+        if method == "GET" and "/comments" in url:
+            return _Response(self.comments)
+        payload = json.loads(request.data.decode())
+        if method == "POST" and url.rstrip("/").endswith("/comments"):
+            comment = _comment(
+                900,
+                payload["body"],
+                "github-actions[bot]",
+                "Bot",
+                "2026-10-11T04:00:00Z",
+            )
+            self.comments.insert(0, comment)
+            return _Response(comment)
+        if method == "PATCH" and "/issues/comments/" in url:
+            comment_id = int(url.rstrip("/").split("/")[-1])
+            if comment_id == 200:
+                raise OSError("forbidden")
+            for comment in self.comments:
+                if int(comment["id"]) == comment_id:
+                    comment["body"] = payload["body"]
+                    return _Response({"id": comment_id, "body": payload["body"]})
+            raise OSError(f"missing comment {comment_id}")
+        raise AssertionError(url)
+
+
+def _run(monkeypatch, tmp_path, api: _CommentApi, payload: dict, event_name: str) -> int:
+    event_path = tmp_path / "event.json"
+    event_path.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr("automations.qa_loop.bridge.urllib.request.urlopen", api.opener)
+    return run_from_env(
+        {
+            "GITHUB_EVENT_NAME": event_name,
+            "GITHUB_EVENT_PATH": str(event_path),
+            "GITHUB_REPOSITORY": "The-sky1234/pdf-classification-9m",
+            "GITHUB_TOKEN": "test-token",
+            "QA_AUTOFIX_MODE": "armed",
+            "CURSOR_DEVELOPER_WEBHOOK_URL": "https://api2.cursor.sh/automations/webhook/test",
+            "CURSOR_DEVELOPER_WEBHOOK_TOKEN": "secret",
+        }
+    )
+
+
+def test_armed_runs_ignore_forged_state_and_a_later_done_marker(monkeypatch, tmp_path):
+    pr = 2
+    stopped = _comment(
+        100,
+        render_state_comment(_stopped_state(pr)),
+        "github-actions[bot]",
+        "Bot",
+        "2026-10-11T02:00:01Z",
+    )
+    forged = _comment(
+        200,
+        render_state_comment(initial_state(pr)),
+        "attacker",
+        "User",
+        "2026-10-11T02:00:02Z",
+    )
+    api = _CommentApi([forged, stopped])
+    review = {
+        "review": {
+            "id": 50,
+            "body": qa_body("FAIL", SHA_D),
+            "commit_id": SHA_D,
+            "state": "COMMENTED",
+            "submitted_at": "2026-10-11T03:00:00Z",
+            "user": {"login": "cursor[bot]", "type": "Bot"},
+        },
+        "pull_request": {"number": pr},
+    }
+    assert _run(monkeypatch, tmp_path, api, review, "pull_request_review") == 0
+    assert _run(monkeypatch, tmp_path, api, review, "pull_request_review") == 0
+    assert api.webhook_posts == 0
+
+    pr = 4
+    running = _comment(
+        100,
+        render_state_comment(_running_state(pr)),
+        "github-actions[bot]",
+        "Bot",
+        "2026-10-11T01:00:01Z",
+    )
+    done = _comment(
+        300,
+        done_body(SHA_A, "pushed", SHA_B),
+        "cursor[bot]",
+        "Bot",
+        "2026-10-11T02:00:00Z",
+    )
+    api = _CommentApi([done, running])
+    human = {
+        "action": "created",
+        "issue": {"number": pr, "pull_request": {"url": "https://example.test/pull/4"}},
+        "comment": {
+            "id": 400,
+            "body": "looks good",
+            "created_at": "2026-10-11T02:10:00Z",
+            "user": {"login": "attacker", "type": "User"},
+        },
+    }
+    assert _run(monkeypatch, tmp_path, api, human, "issue_comment") == 0
+    assert api.webhook_posts == 0
+    saved = state_from_comment(running["body"], pr)
+    assert saved["in_progress"] is False
+
+    later_fail = {
+        "review": {
+            "id": 60,
+            "body": qa_body("FAIL", SHA_B),
+            "commit_id": SHA_B,
+            "state": "COMMENTED",
+            "submitted_at": "2026-10-11T03:00:00Z",
+            "user": {"login": "cursor[bot]", "type": "Bot"},
+        },
+        "pull_request": {"number": pr},
+    }
+    assert _run(monkeypatch, tmp_path, api, later_fail, "pull_request_review") == 0
+    assert api.webhook_posts == 1
+    assert _run(monkeypatch, tmp_path, api, later_fail, "pull_request_review") == 0
+    assert api.webhook_posts == 1

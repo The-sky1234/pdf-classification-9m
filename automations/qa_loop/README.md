@@ -61,7 +61,9 @@ printf '%s' '<webhook-api-key>' | gh secret set CURSOR_DEVELOPER_WEBHOOK_TOKEN -
 
 5. 先做下面的观察验证。确认观察结果符合表格后，再把 repository variable `QA_AUTOFIX_MODE` 设为 `armed`，并只在那时启用 Developer 自动化。本变更没有做第 5 步。
 
-`observe` 只打印判断，不写状态评论，不调用 webhook。`armed` 才会在 webhook 返回 `{"success": true}` 之后写入 `pdf-autofix-state`。webhook 失败不推进轮次。手动 `workflow_dispatch` 即使变量已经是 `armed` 也强制观察，避免手点一次就启动修复。
+`observe` 只打印判断，不写状态评论，不调用 webhook。`armed` 在调用 webhook 之前先把轮次写入 `pdf-autofix-state`；webhook 没有返回 `{"success": true}` 时会把这条状态改回去，轮次不保留。状态写不进去时不会调用 webhook。手动 `workflow_dispatch` 即使变量已经是 `armed` 也强制观察，避免手点一次就启动修复。
+
+状态评论只认 `github-actions[bot]`。其他作者的评论即使带有 `pdf-autofix-state` 也不会被采用；只有这几个字、没有合法 JSON 的评论会被跳过，不会挡住更早的 Actions 状态。`cursor[bot]` 已经写在 PR 上的 `pdf-autofix-done` 会在下一次运行时对账，包括触发事件本身不是完成标记的情况。这样，完成事件若还在排队就被同一并发组里的后一条评论取消，后一次运行仍能打开锁。
 
 ## 验证
 
