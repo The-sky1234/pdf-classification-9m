@@ -41,6 +41,7 @@ jobs:
 
       - name: Decide whether a fix may start
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           QA_AUTOFIX_MODE: ${{ vars.QA_AUTOFIX_MODE }}
           CURSOR_DEVELOPER_WEBHOOK_URL: ${{ secrets.CURSOR_DEVELOPER_WEBHOOK_URL }}
           CURSOR_DEVELOPER_WEBHOOK_TOKEN: ${{ secrets.CURSOR_DEVELOPER_WEBHOOK_TOKEN }}
