@@ -52,13 +52,17 @@ def handle_pdf_task(db: Session, message: dict, classify_fn=None, dedup_done: bo
         return decision
     decision["version"] = 1
     decision["source_sha256"] = sha
+    basis = {"reason": decision.get("reason"), "target_dir": decision.get("target_dir"),
+             "doc_type": parsed.get("doc_type"),
+             "dedup": "already_done" if dedup_done else "checked"}
+    if decision.get("level1"):
+        basis["level1"] = decision["level1"]
+    if decision.get("level2"):
+        basis["level2"] = decision["level2"]
     payload = {"file_path": reg.source_path, "file_id": fid, "task_id": message.get("task_id"),
                "result_type": decision["result_type"], "version": 1, "content_version": version,
                "source_sha256": sha, "taxonomy_version": "v3.0-phase1",
-               "classification_basis": {"reason": decision.get("reason"),
-                                        "target_dir": decision.get("target_dir"),
-                                        "doc_type": parsed.get("doc_type"),
-                                        "dedup": "already_done" if dedup_done else "checked"}}
+               "classification_basis": basis}
     if decision["result_type"] == "CLASSIFIED":
         payload["level1"] = decision.get("level1")
         payload["level2"] = decision.get("level2")
