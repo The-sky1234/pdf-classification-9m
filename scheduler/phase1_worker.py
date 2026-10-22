@@ -21,8 +21,12 @@ def _file_sha(path: str) -> tuple[str, int]:
     return h.hexdigest(), n
 
 
-def handle_pdf_task(db: Session, message: dict, classify_fn=None) -> dict:
-    """解析并判决。消息里的 content_version 更旧时丢弃，不写决策。"""
+def _dedup_already_done() -> bool:
+    return os.environ.get("DEDUP_ALREADY_DONE", "1") != "0"
+
+
+def handle_pdf_task(db: Session, message: dict, classify_fn=None, dedup_done: bool | None = None) -> dict:
+    """解析并判决。去重默认已经完成，不再把相同字节送进重复件。"""
     fid = message["file_id"]
     reg = db.get(FileRegistry, fid)
     if reg is None:
@@ -32,11 +36,17 @@ def handle_pdf_task(db: Session, message: dict, classify_fn=None) -> dict:
     sha, nbytes = _file_sha(reg.source_path)
     version, _bumped = store.note_content(db, fid, sha, nbytes, os.stat(reg.source_path).st_mtime)
     db.refresh(reg)
-    dup = exact(db, fid, sha, nbytes)
-    if dup["is_exact_dup"] and store.master_is_patent(db, dup["master_id"]):
-        dup = dict(dup, master_is_patent=True)
-    from parser.parser import parse_pdf
-    parsed = parse_pdf(reg.source_path).to_dict()
+    if dedup_done is None:
+        dedup_done = _dedup_already_done()
+    if dedup_done:
+        dup = {"group_id": None, "is_exact_dup": False, "master_id": fid,
+               "skipped": "already_deduped"}
+    else:
+        dup = exact(db, fid, sha, nbytes)
+        if dup["is_exact_dup"] and store.master_is_patent(db, dup["master_id"]):
+            dup = dict(dup, master_is_patent=True)
+    from parser.documents import parse_document
+    parsed = parse_document(reg.source_path)
     decision = decide(fid, parsed, dup, classify_fn=classify_fn, content_version=version)
     if decision.get("action") == "RETRY":
         return decision
@@ -46,7 +56,9 @@ def handle_pdf_task(db: Session, message: dict, classify_fn=None) -> dict:
                "result_type": decision["result_type"], "version": 1, "content_version": version,
                "source_sha256": sha, "taxonomy_version": "v3.0-phase1",
                "classification_basis": {"reason": decision.get("reason"),
-                                        "target_dir": decision.get("target_dir")}}
+                                        "target_dir": decision.get("target_dir"),
+                                        "doc_type": parsed.get("doc_type"),
+                                        "dedup": "already_done" if dedup_done else "checked"}}
     if decision["result_type"] == "CLASSIFIED":
         payload["level1"] = decision.get("level1")
         payload["level2"] = decision.get("level2")
@@ -55,6 +67,9 @@ def handle_pdf_task(db: Session, message: dict, classify_fn=None) -> dict:
     row = store.write_decision(db, decision, result_id=result.id)
     return {"action": "DECIDE", "result_id": result.id, "decision_id": row.id,
             "queue": {"file_id": fid, "version": row.version, "content_version": version}}
+
+
+handle_document_task = handle_pdf_task
 
 
 def handle_archive_task(db: Session, message: dict, archive_root: str) -> dict:

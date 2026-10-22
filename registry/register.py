@@ -6,6 +6,7 @@ from backend.models import (
     DocTask, FileRegistry, ProcessingBatch, ProcessingTask, file_hash_of,
 )
 from registry.ids import uuid7
+from registry.kinds import is_document
 
 
 def _inside_archive(root: str, archive_root: str | None) -> bool:
@@ -17,12 +18,12 @@ def _inside_archive(root: str, archive_root: str | None) -> bool:
         return False
 
 
-def _pdf_paths(root: str) -> list[str]:
+def _document_paths(root: str) -> list[str]:
     found: list[str] = []
     for dp, dirnames, fns in os.walk(root):
         dirnames.sort()
         for fn in fns:
-            if fn.lower().endswith(".pdf"):
+            if is_document(fn):
                 found.append(os.path.normpath(os.path.abspath(os.path.join(dp, fn))))
     found.sort()
     return found
@@ -46,7 +47,7 @@ def scan_register(db: Session, root: str, limit: int = 1000, batch_id: int | Non
     cursor = batch.cursor_path or ""
     items: list[dict] = []
     blocked = False
-    for path in _pdf_paths(root):
+    for path in _document_paths(root):
         if cursor and path <= cursor:
             continue
         if len(items) >= limit:
