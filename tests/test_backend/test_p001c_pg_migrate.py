@@ -32,6 +32,8 @@ ALLOWED_TABLES = {
     "file_registry",
     "file_content_versions",
     "processing_tasks",
+    "review_records",
+    "dedup_members",
     "schema_migrations",
 }
 REQUIRED_TABLES = ALLOWED_TABLES
@@ -210,6 +212,7 @@ def test_migration_chain_on_isolated_postgres(proof):
         "001_init.sql",
         "002_archive.sql",
         "003_registry.sql",
+        "004_phase1_loop.sql",
     ]
     assert proof["applied_second"] == []
     assert proof["versions"] == proof["applied_first"]
@@ -710,5 +713,5 @@ def test_business_rows_rolled_back(tx):
         cur.execute("SELECT count(*) FROM schema_migrations")
         versions = cur.fetchone()[0]
     print("COUNTS_AFTER", counts, "SCHEMA_MIGRATIONS", versions)
-    assert versions == 3
+    assert versions == 4
     assert all(n == 0 for n in counts.values()), counts
