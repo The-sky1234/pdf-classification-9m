@@ -12,10 +12,10 @@ from scheduler.phase1_worker import _file_sha, handle_archive_task, handle_docum
 
 def run(db: Session, root: str, archive_root: str, *, limit: int = 200,
         batch_id: int | None = None, classify_fn=None, calibrated: bool | None = None) -> dict:
-    """登记一个目录里的各类文档，解析后分类，再按阶段一目录复制。
+    """登记目录，取前五页文字，用模型判标签，再复制到对应目录。
 
-    去重默认已经完成。阈值未校准时，业务标签只进入待复核，不写入 27 个场景目录。
-    同一批次可续跑。字节未变且该版本已经复制完成的文件不再解析。
+    有文字的页直接抽取，图片页才 OCR。模型给出合法标签就写入业务目录。
+    单份文件损坏或分类失败只记入待复核，不中断其余文件。同一批次可续跑。
     """
     if _archive_inside_source(root, archive_root):
         raise ValueError("archive is inside source root")
@@ -48,6 +48,13 @@ def _one(db: Session, item: dict, archive_root: str, classify_fn) -> str:
         decided = handle_document_task(db, item, classify_fn=classify_fn)
     except OSError:
         return "MISSING"
+    except Exception as exc:
+        db.rollback()
+        try:
+            decided = handle_document_task(db, item, classify_fn=lambda _parse: {
+                "result_type": "MANUAL_REVIEW", "reason": f"classify_failed: {exc}"[:80]})
+        except Exception:
+            return "ERROR"
     action = decided.get("action")
     if action == "RETRY":
         return "RETRY"

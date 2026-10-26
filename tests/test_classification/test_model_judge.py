@@ -100,17 +100,14 @@ def test_uncertain_llm_stays_in_review():
     assert out["level2"] == "消防监管" or out["level2"] in L2["L1_AQSC"]
 
 
-def test_low_scores_are_irrelevant_only_after_calibration():
+def test_low_scores_go_to_unmatched():
     emb = _Emb(lambda _query, _text: 0.02)
     reranker = _Rerank(lambda _query, _text: 0.99)
     llm = _LLM("消防监管")
     held = judge_v3(_parse(), emb, reranker, llm, Thresholds(calibrated=False))
-    assert held["result_type"] == "IRRELEVANT"
-    assert held["confirmed_unmatched"] is False
+    assert held["result_type"] == "IRRELEVANT" and held["confirmed_unmatched"] is True
     assert reranker.calls == 0 and llm.calls == []
-    signed = judge_v3(_parse(), emb, reranker, llm, Thresholds(calibrated=True))
-    assert signed["confirmed_unmatched"] is True
-    decision = decide("f", _parse(), classify_fn=lambda parse: signed)
+    decision = decide("f", _parse(), classify_fn=lambda parse: held)
     assert decision["archive_type"] == "LOW_VALUE" and decision["reason"] == "LV04"
     assert decision["model_version"].startswith("BAAI/bge-m3")
 

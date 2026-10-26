@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""按六个阶段处理一个混合目录：文本、办公文档、网页、版式文件、图片和 PDF。
+"""处理一个目录里的文件，损坏或类型不对的文件跳过并记入结果，不中断其余文件。
 
-分类默认使用 BGE-M3、bge-reranker-v2-m3，边界不清时才请求 LLM_ENDPOINT。
+每份文件只取前五页。有文字就直接抽，图片才 OCR。然后用 BGE-M3、
+bge-reranker-v2-m3 判断标签，分数接近时才请求 LLM_ENDPOINT。
 CLASSIFIER_BACKEND=keyword 只用于没有模型的开发对照。
 
   python scripts/run_campaign.py --root /data/docs --archive /data/archive --report /data/archive/campaign.json

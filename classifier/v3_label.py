@@ -127,7 +127,7 @@ def judge_v3(parse: dict, emb, reranker, llm, th: Thresholds | None = None) -> d
     scores = {"l1": l1_scores, "l1_margin": margin}
     if top_score < th.relevance_irrelevant and all(value < 0.35 for value in l1_scores.values()):
         return {**base, "result_type": "IRRELEVANT", "reason": "all_low",
-                "calibrated": bool(th.calibrated), "confirmed_unmatched": bool(th.calibrated),
+                "calibrated": bool(th.calibrated), "confirmed_unmatched": True,
                 "decision_source": "BGE_DIRECT", "candidate_scores": scores}
     l1_source = "BGE_DIRECT"
     if not (top_score >= th.l1_direct_min and margin >= th.l1_direct_margin):
