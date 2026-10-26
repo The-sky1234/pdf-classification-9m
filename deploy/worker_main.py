@@ -43,20 +43,18 @@ def build_handlers(role: str):
     q = RedisQueue(REDIS_URL or "redis://redis:6379/0")
     store = FilePayloadStore(PAYLOAD_DIR)
     if role in ("parser", "ocr", "mineru"):
-        from parser.parser import parse_pdf
+        from parser.documents import parse_for_role
         lease_group = {"parser": None, "ocr": "ocr", "mineru": "mineru"}[role]
-        kwargs = {}
+        mineru = None
         if role == "mineru":
             from parser.mineru_adapter import MinerUAdapter
-            kwargs["mineru"] = MinerUAdapter()
+            mineru = MinerUAdapter()
 
         def parse_and_forward(fp: str) -> dict:
             if lease_group:
                 with FileGpuLease(LOCK_DIR, lease_group):
-                    parsed = parse_pdf(fp, **kwargs).to_dict()
-            else:
-                parsed = parse_pdf(fp, **kwargs).to_dict()
-            return parsed
+                    return parse_for_role(fp, role, mineru=mineru)
+            return parse_for_role(fp, role)
 
         def forward_only(_):
             return {"result_type": "MANUAL_REVIEW",

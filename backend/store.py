@@ -362,6 +362,13 @@ def write_decision(db: Session, decision: dict, result_id: int | None = None) ->
     existing = db.scalar(select(ArchiveDecision).where(
         ArchiveDecision.file_id == fid, ArchiveDecision.version == version))
     if existing:
+        # 结果行先落了一条没有场景的待复核决策。判决里的一级、二级补到这行上。
+        if existing.decision_status != "APPROVED":
+            if decision.get("level1") and not existing.level1:
+                existing.level1 = decision["level1"]
+            if decision.get("level2") and not existing.level2:
+                existing.level2 = decision["level2"]
+            db.commit()
         return existing
     row = ArchiveDecision(
         file_id=fid, version=version, archive_type=decision["archive_type"],
@@ -408,3 +415,38 @@ def record_execution(db: Session, decision_id: int, file_id: str, checks: dict) 
     db.commit()
     db.refresh(row)
     return row
+
+
+def metrics_text(db: Session) -> str:
+    """Prometheus 文本。按扩展名和归档状态计数，正文不出现在指标里。"""
+    import os
+    from collections import Counter
+    exts: Counter[str] = Counter()
+    for path in db.scalars(select(FileRegistry.source_path)).all():
+        ext = os.path.splitext(path or "")[1].lower().lstrip(".") or "none"
+        if not ext.replace("_", "").isalnum():
+            ext = "other"
+        exts[ext] += 1
+    pairs: Counter[tuple[str, str]] = Counter()
+    rows = db.execute(select(ArchiveExecution.status, ArchiveDecision.archive_type).join(
+        ArchiveDecision, ArchiveDecision.id == ArchiveExecution.decision_id)).all()
+    for status, archive_type in rows:
+        pairs[(status or "UNKNOWN", archive_type or "UNKNOWN")] += 1
+    lines = [
+        "# HELP pdfcls_files_registered Registered source files by extension",
+        "# TYPE pdfcls_files_registered gauge",
+    ]
+    for ext, count in sorted(exts.items()):
+        lines.append(f'pdfcls_files_registered{{ext="{ext}"}} {count}')
+    if not exts:
+        lines.append('pdfcls_files_registered{ext="none"} 0')
+    lines += [
+        "# HELP pdfcls_archive_files Archive executions by status and type",
+        "# TYPE pdfcls_archive_files gauge",
+    ]
+    for (status, archive_type), count in sorted(pairs.items()):
+        lines.append(
+            f'pdfcls_archive_files{{status="{status}",archive_type="{archive_type}"}} {count}')
+    if not pairs:
+        lines.append('pdfcls_archive_files{status="NONE",archive_type="NONE"} 0')
+    return "\n".join(lines) + "\n"

@@ -60,8 +60,11 @@ def parse_pdf(file_path: str, ocr_backend=None, mineru=None, max_pages: int = 0,
                     oc = ocr_pages(doc, needed, ocr_backend=ocr_backend)
                     pages = oc
                 except Exception as e:
+                    # 没装 OCR 引擎时再试也没有结果，交给复核。超时一类的失败仍可重试。
+                    missing_engine = isinstance(e, ModuleNotFoundError) or "No module named" in str(e)
                     return ParseResult(file_path=file_path, pdf_type=pdf_type, page_count=len(doc),
-                                       ok=False, error=ParseErrorInfo(ErrorCode.OCR_FAILED, str(e), True))
+                                       ok=False, error=ParseErrorInfo(
+                                           ErrorCode.OCR_FAILED, str(e), not missing_engine))
                 scores = [p.ocr_score or 0 for p in pages]
                 mean = sum(scores) / len(scores) if scores else 0.0
                 return ParseResult(file_path=file_path, pdf_type=pdf_type,

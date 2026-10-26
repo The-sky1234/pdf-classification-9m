@@ -116,6 +116,25 @@ def _text_doc(path: str, text: str, doc_type: str, pdf_type: str = "TEXT_PDF") -
             "truncated": len(text) > 8000}
 
 
+def parse_for_role(file_path: str, role: str = "parser", ocr_backend=None, mineru=None,
+                   max_pages: int = 0) -> dict:
+    """按角色解析任意已登记类型。只有 PDF 才走 PyMuPDF、OCR 或 MinerU。"""
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext in PDF_EXT:
+        from parser.parser import parse_pdf
+        parsed = parse_pdf(
+            file_path,
+            ocr_backend=ocr_backend if role == "ocr" else None,
+            mineru=mineru if role == "mineru" else None,
+            max_pages=max_pages,
+        ).to_dict()
+        parsed["doc_type"] = parsed.get("doc_type") or "pdf"
+        return parsed
+    if ext in IMAGE_EXT and role == "ocr":
+        return parse_document(file_path, ocr_backend=ocr_backend, max_pages=max_pages)
+    return parse_document(file_path, max_pages=max_pages)
+
+
 def _fail(path: str, code: str, message: str, retryable: bool, doc_type: str) -> dict:
     return {"file_path": path, "pdf_type": None, "doc_type": doc_type, "evidence_mode": None,
             "page_count": 0, "title": "", "headings": [], "pages": [], "ok": False,

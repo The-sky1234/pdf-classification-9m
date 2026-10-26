@@ -150,6 +150,11 @@ def build_app(db_url: str = DATABASE_URL) -> FastAPI:
         return {"taxonomy_version": "v3.0-phase1", "level1": list(L1.keys()),
                 "l2_counts": counts, "total_l2": total}
 
+    @app.get("/metrics")
+    def metrics(s: Session = Depends(db)):
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(store.metrics_text(s), media_type="text/plain; version=0.0.4")
+
     @app.get("/archive/{file_id}", dependencies=[Depends(require_key)])
     def archive_status(file_id: str, s: Session = Depends(db)):
         view = store.archive_view(s, file_id)
