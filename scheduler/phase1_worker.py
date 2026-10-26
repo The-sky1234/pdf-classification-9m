@@ -63,6 +63,13 @@ def handle_pdf_task(db: Session, message: dict, classify_fn=None, dedup_done: bo
                "result_type": decision["result_type"], "version": 1, "content_version": version,
                "source_sha256": sha, "taxonomy_version": "v3.0-phase1",
                "classification_basis": basis}
+    for key in ("model_version", "decision_source", "prompt_version"):
+        if decision.get(key):
+            basis[key] = decision[key]
+            payload[key] = decision[key]
+    if decision.get("candidate_scores"):
+        basis["candidate_scores"] = decision["candidate_scores"]
+        payload["candidate_scores"] = decision["candidate_scores"]
     if decision["result_type"] == "CLASSIFIED":
         payload["level1"] = decision.get("level1")
         payload["level2"] = decision.get("level2")

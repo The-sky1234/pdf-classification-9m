@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from backend import store
 from backend.models import ArchiveDecision, ArchiveExecution, FileRegistry
 from classifier.config import Thresholds
-from classifier.v3_label import make_v3_classifier
+from classifier.v3_label import make_runtime_classifier
 from registry.register import scan_register
 from scheduler.phase1_worker import _file_sha, handle_archive_task, handle_document_task
 
@@ -17,12 +17,12 @@ def run(db: Session, root: str, archive_root: str, *, limit: int = 200,
     去重默认已经完成。阈值未校准时，业务标签只进入待复核，不写入 27 个场景目录。
     同一批次可续跑。字节未变且该版本已经复制完成的文件不再解析。
     """
+    if _archive_inside_source(root, archive_root):
+        raise ValueError("archive is inside source root")
     if classify_fn is None:
         if calibrated is None:
             calibrated = os.environ.get("THRESHOLDS_CALIBRATED", "0") == "1"
-        classify_fn = make_v3_classifier(Thresholds(calibrated=bool(calibrated)))
-    if _archive_inside_source(root, archive_root):
-        raise ValueError("archive is inside source root")
+        classify_fn = make_runtime_classifier(Thresholds(calibrated=bool(calibrated)))
     os.makedirs(archive_root, exist_ok=True)
     counts: dict[str, int] = {}
     seen_batch = batch_id

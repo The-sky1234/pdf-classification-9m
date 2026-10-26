@@ -61,9 +61,11 @@ def run_campaign(db: Session, root: str, archive_root: str, *, limit: int = 200,
 
 
 def _knowledge() -> dict:
+    from classifier.v3_label import classifier_plan
     counts = {key: len(names) for key, names in L2.items()}
     return {"taxonomy_version": "v3.0-phase1", "level1": list(L1), "l2_counts": counts,
-            "total_l2": sum(counts.values()), "ready": sum(counts.values()) == 27 and len(L1) == 4}
+            "total_l2": sum(counts.values()), "ready": sum(counts.values()) == 27 and len(L1) == 4,
+            "classifier": classifier_plan()}
 
 
 def _files(db: Session) -> list[dict]:

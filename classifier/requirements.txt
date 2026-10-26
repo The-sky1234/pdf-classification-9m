@@ -1,5 +1,6 @@
 pytest>=8
-# Windows开发仅需Mock；Linux GPU服务器另装：
-# sentence-transformers>=2.2 (BGE-M3 via FlagEmbedding)
+# 生产分类默认 CLASSIFIER_BACKEND=model，服务器需另装：
 # FlagEmbedding>=1.2
-# paddleocr / mineru 按parser需求
+# sentence-transformers>=2.2
+# torch
+# LLM 不装进本进程，配置 LLM_ENDPOINT 指向 OpenAI 兼容接口。

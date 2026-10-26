@@ -25,6 +25,7 @@ def _corpus(root):
 
 def test_scan_classifies_each_kind_and_skips_on_rerun(tmp_path, monkeypatch):
     monkeypatch.setenv("DEDUP_ALREADY_DONE", "1")
+    monkeypatch.setenv("CLASSIFIER_BACKEND", "keyword")
     monkeypatch.setenv("THRESHOLDS_CALIBRATED", "0")
     src = tmp_path / "src"
     _corpus(src)
@@ -49,6 +50,7 @@ def test_scan_classifies_each_kind_and_skips_on_rerun(tmp_path, monkeypatch):
 
 def test_calibrated_scene_keeps_extension(tmp_path, monkeypatch):
     monkeypatch.setenv("DEDUP_ALREADY_DONE", "1")
+    monkeypatch.setenv("CLASSIFIER_BACKEND", "keyword")
     src = tmp_path / "src"
     src.mkdir()
     (src / "fire.txt").write_text("消防监管检查通知。各单位排查隐患。", encoding="utf-8")
@@ -75,6 +77,7 @@ def test_cli_rejects_archive_inside_source(tmp_path, capsys):
 
 def test_cli_prints_summary(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("DEDUP_ALREADY_DONE", "1")
+    monkeypatch.setenv("CLASSIFIER_BACKEND", "keyword")
     monkeypatch.setenv("THRESHOLDS_CALIBRATED", "0")
     src = tmp_path / "src"
     src.mkdir()

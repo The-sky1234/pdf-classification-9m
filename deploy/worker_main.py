@@ -65,19 +65,16 @@ def build_handlers(role: str):
         return q, pipe, store
     if role == "classify":
         api_url, api_key = require_env("API_URL"), require_env("API_KEY")
-        from classifier.pipeline import ClassificationPipeline
         from classifier.config import Thresholds
-        from classifier.backends import BgeM3Backend, CrossEncoderBackend, LLMHttpBackend
-        clf = ClassificationPipeline(BgeM3Backend(), CrossEncoderBackend(),
-                                     LLMHttpBackend(os.environ.get("LLM_ENDPOINT", "")),
-                                     Thresholds(calibrated=os.environ.get(
-                                         "THRESHOLDS_CALIBRATED", "0") == "1"))
+        from classifier.v3_label import make_model_classifier
+        clf = make_model_classifier(Thresholds(calibrated=os.environ.get(
+            "THRESHOLDS_CALIBRATED", "0") == "1"))
 
         def classify_ref(payload: dict) -> dict:
             ref = payload.get("parse_ref", "")
             parsed = store.load(ref) if ref else payload
             with FileGpuLease(LOCK_DIR, "infer"):
-                return clf.run(parsed)
+                return clf(parsed)
 
         def save_result(res: dict):
             import urllib.request
