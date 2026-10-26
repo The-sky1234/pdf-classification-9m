@@ -125,7 +125,7 @@ def test_gates_do_not_guess():
     long = "危险化学品监管" * 2000
     feat = build({"ok": True, "title": "危险化学品监管通知", "headings": [], "evidence_mode": "BODY",
                   "pdf_type": "TEXT_PDF", "pages": [{"page_no": 1, "text": long}]})
-    assert len(feat["query_text"]) <= 3000 and feat["page_evidence"]
+    assert len(feat["query_text"]) <= 8000 and feat["page_evidence"]
     assert message_is_current(None, None) and not message_is_current(1, 2)
     assert message_is_current(2, 2)
 

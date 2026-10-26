@@ -72,7 +72,7 @@ class BgeM3Backend:
             return []
         self.ensure_available()
         model = self._load()
-        query_vec = _dense_rows(model.encode([query], batch_size=1, max_length=1024))[0]
+        query_vec = _dense_rows(model.encode([query], batch_size=1, max_length=4096))[0]
         rows = _dense_rows(model.encode(list(candidates), batch_size=8, max_length=512))
         if len(rows) != len(candidates):
             raise RuntimeError("bge-m3 returned a different number of vectors")

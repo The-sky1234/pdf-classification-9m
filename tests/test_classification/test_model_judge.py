@@ -2,6 +2,7 @@ import json
 
 from classifier.backends import LLMHttpBackend
 from classifier.config import Thresholds
+from classifier.features import build
 from classifier.scene_kb import L1_TEXT, SCENE_TEXT
 from classifier.taxonomy_v3 import L1, L2
 from classifier.v3_label import judge_v3, make_runtime_classifier
@@ -48,6 +49,14 @@ class _LLM:
     def choose(self, evidence, options, allow_uncertain=True):
         self.calls.append(options)
         return {"choice": self.choice, "reason": "scripted"}
+
+
+def test_model_reads_only_the_first_five_pages():
+    pages = [{"page_no": index, "text": f"第{index}页正文内容足够用来分类。"} for index in range(1, 8)]
+    feature = build({"ok": True, "title": "封面", "evidence_mode": "BODY", "pages": pages})
+    assert "第5页" in feature["query_text"]
+    assert "第6页" not in feature["query_text"] and "第7页" not in feature["query_text"]
+    assert [item["page_no"] for item in feature["page_evidence"]] == [1, 2, 3, 4, 5]
 
 
 def test_scene_knowledge_covers_the_27_names():

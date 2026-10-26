@@ -67,6 +67,59 @@ def test_readonly_original_untouched(tmp_path):
     assert hashlib.md5(open(p, "rb").read()).hexdigest() == h0
 
 
+def test_only_the_first_five_pages_are_read(tmp_path):
+    import pymupdf as fitz
+    p = str(tmp_path / "long.pdf")
+    doc = fitz.open()
+    for index in range(1, 7):
+        page = doc.new_page()
+        page.insert_text((72, 100), f"Safety inspection record page {index} hazard notice", fontsize=12)
+    doc.save(p)
+    doc.close()
+    called = {"n": 0}
+
+    def _ocr(_image):
+        called["n"] += 1
+        return [("should-not-ocr-text", (0, 0, 1, 1), 0.5)]
+
+    parsed = parse_pdf(p, ocr_backend=_ocr)
+    assert parsed.ok and parsed.truncated and parsed.page_count == 6
+    assert len(parsed.pages) == 5
+    joined = "\n".join(page.text for page in parsed.pages)
+    assert "page 5" in joined and "page 6" not in joined
+    assert called["n"] == 0
+    assert parsed.evidence_mode != "OCR_BODY"
+
+
+def test_image_pages_are_ocr_and_text_pages_are_not(tmp_path):
+    import pymupdf as fitz
+    p = str(tmp_path / "mixed.pdf")
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "Fire supervision inspection notice for every unit.", fontsize=12)
+    image_page = doc.new_page()
+    blank = fitz.open()
+    blank.new_page()
+    image_page.insert_image(image_page.rect, stream=blank[0].get_pixmap(dpi=72).tobytes("png"))
+    for index in range(3, 7):
+        tail = doc.new_page()
+        tail.insert_text((72, 100), f"Written page {index} stays as text and is not a picture.", fontsize=12)
+    doc.save(p)
+    doc.close()
+    blank.close()
+    seen = []
+
+    def _ocr(_image):
+        seen.append(1)
+        return [("scanned fire supervision page", (10, 10, 80, 30), 0.91)]
+
+    parsed = parse_pdf(p, ocr_backend=_ocr)
+    assert parsed.ok and len(parsed.pages) == 5 and len(seen) == 1
+    assert "Fire supervision" in parsed.pages[0].text
+    assert parsed.pages[1].text == "scanned fire supervision page"
+    assert parsed.evidence_mode == "OCR_BODY"
+
+
 def test_vision_reserved():
     from parser.vision_stub import VisionStub
     import pytest

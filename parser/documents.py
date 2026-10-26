@@ -4,6 +4,7 @@ import re
 import zipfile
 from xml.etree import ElementTree as ET
 
+from parser.limits import LABEL_PAGES
 from parser.parser import parse_pdf
 
 _W_T = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"
@@ -21,8 +22,8 @@ OLE_EXT = {".doc", ".wps", ".xls", ".et", ".ppt", ".dps"}
 PDF_EXT = {".pdf"}
 
 
-def parse_document(file_path: str, ocr_backend=None, mineru=None, max_pages: int = 0):
-    """按扩展名抽取关键文本。PDF 仍走原解析；去重不在这里做。"""
+def parse_document(file_path: str, ocr_backend=None, mineru=None, max_pages: int | None = None):
+    """抽出前五页文字。有文字层就直接取，图片页才 OCR。去重不在这里做。"""
     ext = os.path.splitext(file_path)[1].lower()
     try:
         size = os.path.getsize(file_path)
@@ -68,7 +69,8 @@ def _office_text(path: str, ext: str) -> str:
         if ext in DOCX_EXT:
             names = [n for n in names if n.startswith("word/")] or names
         elif ext in PPTX_EXT:
-            names = [n for n in names if n.startswith("ppt/slides/")] or names
+            slides = [n for n in names if _slide_no(n) is not None]
+            names = sorted(slides or names, key=lambda n: _slide_no(n) or 10**9)[:LABEL_PAGES]
         elif ext in XLSX_EXT:
             names = [n for n in names if "sharedStrings" in n or n.startswith("xl/worksheets/")] or names
         chunks = []
@@ -93,15 +95,20 @@ def _xml_text(blob: bytes) -> list[str]:
     return [t.text.strip() for t in root.iter() if t.text and t.text.strip()]
 
 
+def _slide_no(name: str) -> int | None:
+    match = re.search(r"slide(\d+)\.xml$", name, re.I)
+    return int(match.group(1)) if match else None
+
+
 def _image_doc(path: str, ocr_backend) -> dict:
     if ocr_backend is None:
-        return _text_doc(path, "", "image", pdf_type="IMAGE_PDF")
-    text_parts = []
+        from parser.ocr_paddle import paddle_ocr_backend as ocr_backend
     try:
         lines = ocr_backend(open(path, "rb").read())
-        text_parts = [item[0] for item in lines if item and item[0]]
     except Exception as e:
-        return _fail(path, "OCR_FAILED", str(e), True, "image")
+        missing_engine = isinstance(e, ModuleNotFoundError) or "No module named" in str(e)
+        return _fail(path, "OCR_FAILED", str(e), not missing_engine, "image")
+    text_parts = [item[0] for item in lines if item and item[0]]
     return _text_doc(path, "\n".join(text_parts), "image", pdf_type="IMAGE_PDF")
 
 
@@ -117,8 +124,8 @@ def _text_doc(path: str, text: str, doc_type: str, pdf_type: str = "TEXT_PDF") -
 
 
 def parse_for_role(file_path: str, role: str = "parser", ocr_backend=None, mineru=None,
-                   max_pages: int = 0) -> dict:
-    """按角色解析任意已登记类型。只有 PDF 才走 PyMuPDF、OCR 或 MinerU。"""
+                   max_pages: int | None = None) -> dict:
+    """按角色解析。文字页直接抽取，图片页在取前五页时做 OCR。"""
     ext = os.path.splitext(file_path)[1].lower()
     if ext in PDF_EXT:
         from parser.parser import parse_pdf

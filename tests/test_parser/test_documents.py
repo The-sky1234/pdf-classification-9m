@@ -25,6 +25,21 @@ def test_text_markup_and_office(tmp_path):
     assert office["doc_type"] == "docx" and office["pages"][0]["text"] == "隐患排查台账"
 
 
+def test_slides_stop_at_five(tmp_path):
+    deck = tmp_path / "deck.pptx"
+    with zipfile.ZipFile(deck, "w") as zf:
+        for index in range(1, 7):
+            zf.writestr(
+                f"ppt/slides/slide{index}.xml",
+                f'<p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+                f"<a:t>slide {index} body</a:t></p>",
+            )
+    parsed = parse_document(str(deck))
+    assert parsed["ok"]
+    assert "slide 5 body" in parsed["pages"][0]["text"]
+    assert "slide 6 body" not in parsed["pages"][0]["text"]
+
+
 def test_failures_and_types_without_text(tmp_path):
     empty = tmp_path / "empty.md"
     empty.write_bytes(b"")
@@ -33,7 +48,8 @@ def test_failures_and_types_without_text(tmp_path):
     bad.write_bytes(b"PK broken")
     assert parse_document(str(bad))["error"]["code"] == "CORRUPT_UNRECOVERABLE"
     image = parse_document(str(_touch(tmp_path / "a.png", b"\x89PNG")))
-    assert image["ok"] and image["doc_type"] == "image" and image["pages"] == []
+    assert image["ok"] is False and image["doc_type"] == "image"
+    assert image["error"]["code"] == "OCR_FAILED" and image["error"]["retryable"] is False
     ole = parse_document(str(_touch(tmp_path / "a.doc", b"ole")))
     assert ole["ok"] and ole["doc_type"] == "ole" and ole["error"] is None
     unknown = parse_document(str(_touch(tmp_path / "a.bin", b"abc")))
