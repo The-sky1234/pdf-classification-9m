@@ -98,6 +98,9 @@ def build_handlers(role: str):
 
 
 def main() -> int:
+    if ROLE in ("decide", "archive"):
+        from scheduler.phase1_loop import serve
+        return serve(ROLE, lambda: _stop)
     q, pipe, store = build_handlers(ROLE)
     idle = 0
     while not _stop:

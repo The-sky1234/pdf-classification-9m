@@ -298,6 +298,12 @@ def list_item_extra(db: Session, result: ClassificationResult) -> dict:
     return {"target_path": extra["target_path"], "archive_status": extra["archive_status"]}
 
 
+def _mtime(value) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    return datetime.utcfromtimestamp(float(value))
+
+
 def note_content(db: Session, file_id: str, source_sha256: str, nbytes: int, mtime: float) -> tuple[int, bool]:
     """首次确认哈希写成版本 1，不把非 SCAN 打回 PENDING。之后升版才重开非 SCAN 任务。"""
     if not re.fullmatch(r"[0-9a-f]{64}", source_sha256 or ""):
@@ -312,8 +318,10 @@ def note_content(db: Session, file_id: str, source_sha256: str, nbytes: int, mti
     reg.source_sha256 = source_sha256
     reg.content_version = version
     reg.nbytes = nbytes
+    reg.mtime = _mtime(mtime)
     db.add(FileContentVersion(file_id=file_id, content_version=version, source_sha256=source_sha256,
-                              nbytes=nbytes, mtime=mtime, batch_id=reg.batch_id))
+                              nbytes=nbytes, mtime=_mtime(mtime), observed_at=datetime.utcnow(),
+                              batch_id=reg.batch_id))
     tasks = db.scalars(select(ProcessingTask).where(ProcessingTask.file_id == file_id)).all()
     for task in tasks:
         task.content_version = version
@@ -324,6 +332,21 @@ def note_content(db: Session, file_id: str, source_sha256: str, nbytes: int, mti
             task.error_msg = None
     db.commit()
     return version, not first
+
+
+def pending_archive_message(db: Session, file_id: str | None) -> dict | None:
+    """最新判决还没有 COMPLETED 执行时，返回可以投入 archive_tasks 的消息。"""
+    if not file_id:
+        return None
+    decision = _latest_decision(db, file_id)
+    if decision is None:
+        return None
+    done = db.scalar(select(ArchiveExecution).where(
+        ArchiveExecution.decision_id == decision.id, ArchiveExecution.status == "COMPLETED"))
+    if done:
+        return None
+    return {"file_id": decision.file_id, "version": decision.version,
+            "content_version": decision.content_version}
 
 
 def master_is_patent(db: Session, master_id: str) -> bool:

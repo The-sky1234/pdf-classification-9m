@@ -1,7 +1,7 @@
 from __future__ import annotations
 import hashlib
 from datetime import datetime
-from sqlalchemy import Column, String, Integer, Text, DateTime, JSON, create_engine, UniqueConstraint, Float
+from sqlalchemy import Column, String, Integer, Text, DateTime, JSON, create_engine, UniqueConstraint
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 Base = declarative_base()
@@ -111,7 +111,7 @@ class FileRegistry(Base):
     source_path = Column(Text, nullable=False, unique=True)
     source_sha256 = Column(String(64), nullable=True)
     nbytes = Column("bytes", Integer, nullable=False, default=0)
-    mtime = Column(Float, nullable=False, default=0)
+    mtime = Column(DateTime, nullable=False, default=datetime.utcnow)
     batch_id = Column(Integer, nullable=False, index=True)
     content_version = Column(Integer, nullable=True)
     id_origin = Column(String(16), nullable=False, default="V7")
@@ -123,7 +123,8 @@ class FileContentVersion(Base):
     content_version = Column(Integer, primary_key=True)
     source_sha256 = Column(String(64), nullable=False)
     nbytes = Column("bytes", Integer, nullable=False)
-    mtime = Column(Float, nullable=False, default=0)
+    mtime = Column(DateTime, nullable=False, default=datetime.utcnow)
+    observed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     batch_id = Column(Integer, nullable=False)
 
 

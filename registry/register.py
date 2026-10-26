@@ -1,5 +1,7 @@
 from __future__ import annotations
+import json
 import os
+from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from backend.models import (
@@ -35,8 +37,10 @@ def scan_register(db: Session, root: str, limit: int = 1000, batch_id: int | Non
     if _inside_archive(root, archive_root):
         raise ValueError("root is inside ARCHIVE_ROOT")
     if batch_id is None:
-        batch = ProcessingBatch(batch_no=uuid7(), source_roots=os.path.abspath(root),
-                                scan_status="RUNNING")
+        batch = ProcessingBatch(
+            batch_no=uuid7(),
+            source_roots=json.dumps([os.path.abspath(root)], ensure_ascii=False),
+            scan_status="RUNNING")
         db.add(batch)
         db.commit()
         db.refresh(batch)
@@ -91,8 +95,8 @@ def _upsert_file(db: Session, batch: ProcessingBatch, path: str, st) -> dict:
         while tid == fid:
             tid = uuid7()
         row = FileRegistry(file_id=fid, source_path=path, nbytes=st.st_size,
-                           mtime=st.st_mtime, batch_id=batch.id, content_version=None,
-                           id_origin="V7")
+                           mtime=datetime.utcfromtimestamp(st.st_mtime), batch_id=batch.id,
+                           content_version=None, id_origin="V7")
         task = ProcessingTask(task_id=tid, file_id=fid, stage="SCAN", status="PENDING",
                               retry=0, task_origin="V7", content_version=None)
         db.add(row)

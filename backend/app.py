@@ -8,7 +8,7 @@ from backend import store
 from backend.schemas import ScanRequest, ReviewPatch
 from backend.auth import require_key
 from registry.register import scan_register
-from scheduler.queue import FakeQueue
+from scheduler.queue import open_queue
 
 
 def _load_local_env() -> None:
@@ -37,8 +37,8 @@ def build_app(db_url: str = DATABASE_URL) -> FastAPI:
     sessions = make_session(engine)
     app = FastAPI(title="900万PDF智能分类系统API", version="v3.0-phase1")
     app.state.sessions = sessions
-    app.state.pdf_queue = FakeQueue()
-    app.state.archive_queue = FakeQueue()
+    app.state.pdf_queue = open_queue("pdf_tasks")
+    app.state.archive_queue = open_queue("archive_tasks")
 
     def db():
         s = sessions()
@@ -60,7 +60,7 @@ def build_app(db_url: str = DATABASE_URL) -> FastAPI:
             raise HTTPException(400, msg)
         for item in out["items"]:
             app.state.pdf_queue.enqueue(item["task_id"], {
-                "file_id": item["file_id"], "task_id": item["task_id"],
+                "v": 1, "file_id": item["file_id"], "task_id": item["task_id"],
                 "content_version": item["content_version"], "source_path": item["source_path"]})
         return out
 
@@ -106,6 +106,9 @@ def build_app(db_url: str = DATABASE_URL) -> FastAPI:
             r = store.save_result(s, payload)
         except ValueError as e:
             raise HTTPException(400, str(e))
+        queued = store.pending_archive_message(s, r.file_id)
+        if queued:
+            app.state.archive_queue.enqueue(f"{queued['file_id']}:{queued['version']}", queued)
         return {"id": r.id}
 
     @app.get("/review/queue", dependencies=[Depends(require_key)])
