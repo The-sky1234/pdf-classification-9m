@@ -14,9 +14,9 @@ DECIDE_STAGE = "DECIDE"
 
 def default_classifier():
     from classifier.config import Thresholds
-    from classifier.v3_label import make_v3_classifier
+    from classifier.v3_label import make_runtime_classifier
     calibrated = os.environ.get("THRESHOLDS_CALIBRATED", "0") == "1"
-    return make_v3_classifier(Thresholds(calibrated=calibrated))
+    return make_runtime_classifier(Thresholds(calibrated=calibrated))
 
 
 def redrive(db: Session, pdf_queue, archive_queue) -> dict:

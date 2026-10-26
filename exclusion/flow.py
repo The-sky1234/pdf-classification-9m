@@ -52,17 +52,32 @@ def decide(file_id: str, parse: dict, dedup: dict | None = None, classify_fn=Non
         return _decision(file_id, "PENDING", "NEED_REVIEW", content_version, reason=low["reason"])
     if classify_fn is None:
         return _decision(file_id, "PENDING", "NEED_REVIEW", content_version, reason="no_classifier")
-    classified = classify_fn(parse)
+    try:
+        classified = classify_fn(parse) or {}
+    except Exception as exc:
+        return _decision(file_id, "PENDING", "NEED_REVIEW", content_version,
+                         reason=f"classify_failed: {exc}"[:80])
     rt = classified.get("result_type")
     l1, l2 = classified.get("level1"), classified.get("level2")
-    if rt == "IRRELEVANT" and classified.get("calibrated") and classified.get("confirmed_unmatched"):
-        return _decision(file_id, "LOW_VALUE", "APPROVED", content_version, reason="LV04")
-    if rt == "CLASSIFIED" and l1 and l2 and classified.get("calibrated"):
+    if rt == "IRRELEVANT" and classified.get("confirmed_unmatched"):
+        return _attach_model(_decision(file_id, "LOW_VALUE", "APPROVED", content_version, reason="LV04"),
+                             classified)
+    if rt == "CLASSIFIED" and l1 and l2:
         try:
             target_dir("BUSINESS", None, l1, l2)
         except AssertionError:
-            return _decision(file_id, "PENDING", "NEED_REVIEW", content_version,
-                             reason="illegal_parent")
-        return _decision(file_id, "BUSINESS", "APPROVED", content_version, level1=l1, level2=l2)
-    return _decision(file_id, "PENDING", "NEED_REVIEW", content_version,
-                     level1=l1, level2=l2, reason=classified.get("reason") or rt or "uncertain")
+            return _attach_model(_decision(file_id, "PENDING", "NEED_REVIEW", content_version,
+                                           reason="illegal_parent"), classified)
+        return _attach_model(_decision(file_id, "BUSINESS", "APPROVED", content_version,
+                                       level1=l1, level2=l2), classified)
+    return _attach_model(_decision(file_id, "PENDING", "NEED_REVIEW", content_version,
+                                   level1=l1, level2=l2,
+                                   reason=classified.get("reason") or rt or "uncertain"), classified)
+
+
+def _attach_model(decision: dict, classified: dict) -> dict:
+    for key in ("model_version", "decision_source", "prompt_version", "candidate_scores"):
+        value = classified.get(key)
+        if value not in (None, "", {}):
+            decision[key] = value
+    return decision

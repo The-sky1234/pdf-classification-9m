@@ -28,10 +28,11 @@ def test_release_lets_a_failed_task_enqueue_again():
 
 def test_scan_drains_into_archive_and_review_replaces_it(tmp_path, monkeypatch):
     monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.setenv("CLASSIFIER_BACKEND", "keyword")
     monkeypatch.delenv("THRESHOLDS_CALIBRATED", raising=False)
     src = tmp_path / "src"
     src.mkdir()
-    (src / "notice.txt").write_text("消防监管检查通知。各单位排查隐患并书面整改。", encoding="utf-8")
+    (src / "notice.txt").write_text("abcdefghijklmnop 补充说明，正文里没有场景名。", encoding="utf-8")
     archive = tmp_path / "archive"
     app = build_app(f"sqlite:///{tmp_path}/loop.db")
     with TestClient(app) as client:
@@ -105,6 +106,7 @@ def test_results_enqueue_archive_message(tmp_path, monkeypatch):
 
 def test_decide_worker_stops_without_touching_redis(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path}/serve.db")
+    monkeypatch.setenv("CLASSIFIER_BACKEND", "keyword")
     monkeypatch.delenv("REDIS_URL", raising=False)
     assert serve("decide", lambda: True) == 0
 

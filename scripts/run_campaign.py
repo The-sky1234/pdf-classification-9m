@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""按六个阶段处理一个混合目录：文本、办公文档、网页、版式文件、图片和 PDF。
+"""处理一个目录里的文件，损坏或类型不对的文件跳过并记入结果，不中断其余文件。
+
+每份文件只取前五页。有文字就直接抽，图片才 OCR。然后用 BGE-M3、
+bge-reranker-v2-m3 判断标签，分数接近时才请求 LLM_ENDPOINT。
+CLASSIFIER_BACKEND=keyword 只用于没有模型的开发对照。
 
   python scripts/run_campaign.py --root /data/docs --archive /data/archive --report /data/archive/campaign.json
 
@@ -17,7 +21,24 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+def _load_local_env() -> None:
+    for rel in (".env", os.path.join("deploy", ".env")):
+        path = ROOT / rel
+        if not path.is_file():
+            continue
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not key.isascii() or not key.replace("_", "").isalnum() or key in os.environ:
+                continue
+            os.environ[key] = value.strip().strip('"').strip("'")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _load_local_env()
     from backend.models import init_db, make_engine, make_session
     from scheduler.campaign import run_campaign
     parser = argparse.ArgumentParser(description="混合文档的六个阶段")
@@ -42,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
             db, os.path.abspath(args.root), os.path.abspath(args.archive),
             limit=args.limit, batch_id=args.batch_id, labels_path=args.labels,
             total_files=args.total_files, calibrated=True if args.calibrated else None)
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
     finally:

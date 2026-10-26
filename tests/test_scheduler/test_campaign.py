@@ -27,6 +27,7 @@ def test_parse_role_keeps_office_off_the_pdf_parser(tmp_path):
 
 def test_campaign_runs_every_phase_on_mixed_files(tmp_path, monkeypatch):
     monkeypatch.setenv("DEDUP_ALREADY_DONE", "1")
+    monkeypatch.setenv("CLASSIFIER_BACKEND", "keyword")
     monkeypatch.delenv("THRESHOLDS_CALIBRATED", raising=False)
     src = tmp_path / "src"
     src.mkdir()
@@ -50,6 +51,7 @@ def test_campaign_runs_every_phase_on_mixed_files(tmp_path, monkeypatch):
     phases = report["phases"]
     assert list(phases) == list(PHASES)
     assert phases["1_knowledge"]["total_l2"] == 27 and phases["1_knowledge"]["ready"]
+    assert phases["1_knowledge"]["classifier"]["uses_mock"] is True
     assert phases["2_validate"]["passed"]
     assert set(phases["2_validate"]["kinds_seen"]) == {
         "txt", "html", "docx", "xlsx", "pptx", "ofd", "png", "csv", "pdf"}

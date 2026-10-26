@@ -46,7 +46,11 @@ def handle_pdf_task(db: Session, message: dict, classify_fn=None, dedup_done: bo
         if dup["is_exact_dup"] and store.master_is_patent(db, dup["master_id"]):
             dup = dict(dup, master_is_patent=True)
     from parser.documents import parse_document
-    parsed = parse_document(reg.source_path)
+    try:
+        parsed = parse_document(reg.source_path)
+    except Exception as exc:
+        parsed = {"ok": False, "file_path": reg.source_path, "doc_type": "unknown",
+                  "error": {"code": "FAILED", "message": str(exc)[:500], "retryable": False}}
     decision = decide(fid, parsed, dup, classify_fn=classify_fn, content_version=version)
     if decision.get("action") == "RETRY":
         return decision
@@ -63,6 +67,13 @@ def handle_pdf_task(db: Session, message: dict, classify_fn=None, dedup_done: bo
                "result_type": decision["result_type"], "version": 1, "content_version": version,
                "source_sha256": sha, "taxonomy_version": "v3.0-phase1",
                "classification_basis": basis}
+    for key in ("model_version", "decision_source", "prompt_version"):
+        if decision.get(key):
+            basis[key] = decision[key]
+            payload[key] = decision[key]
+    if decision.get("candidate_scores"):
+        basis["candidate_scores"] = decision["candidate_scores"]
+        payload["candidate_scores"] = decision["candidate_scores"]
     if decision["result_type"] == "CLASSIFIED":
         payload["level1"] = decision.get("level1")
         payload["level2"] = decision.get("level2")

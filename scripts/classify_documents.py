@@ -57,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         summary = run(db, os.path.abspath(args.root), os.path.abspath(args.archive),
                       limit=args.limit, batch_id=args.batch_id,
                       calibrated=True if args.calibrated else None)
-    except ValueError as e:
+    except (ValueError, RuntimeError) as e:
         print(str(e), file=sys.stderr)
         return 2
     finally:
