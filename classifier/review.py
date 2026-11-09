@@ -103,10 +103,12 @@ class AutoReviewer:
                  "paras": bundle.get("paras", [])[:3],
                  "visual": bool(bundle.get("visual", ""))}
         ids = [c["id"] for c in candidates]
+        if parent and level == "L2":
+            basis["level1_hint"] = parent
         if mode == "OCR_BODY" and ocr_score is not None and ocr_score < self.min_ocr:
             return {"file_path": file_path, "result_type": "UNRESOLVED",
                     "relevance_status": relevance, "evidence_mode": mode,
-                    "level1": parent, "level2": None,
+                    "level1": None, "level2": None,
                     "candidate_scores": scores, "decision_source": "MANUAL",
                     "classification_basis": basis, "model_version": model_version,
                     "taxonomy_version": self.kb["taxonomy_version"],
@@ -162,7 +164,7 @@ class AutoReviewer:
                         "review_stats": self.stats.to_dict()}
         return {"file_path": file_path, "result_type": "UNRESOLVED",
                 "relevance_status": relevance, "evidence_mode": mode,
-                "level1": parent if level == "L2" else None, "level2": None,
+                "level1": None, "level2": None,
                 "candidate_scores": scores, "decision_source": "MANUAL",
                 "classification_basis": basis, "model_version": model_version,
                 "taxonomy_version": self.kb["taxonomy_version"],

@@ -1,12 +1,16 @@
 from __future__ import annotations
 import os
+import time
 from pathlib import Path
 from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel, Field
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from backend.models import make_engine, make_session, init_db
 from backend import store
 from backend.schemas import ScanRequest, ReviewPatch
-from backend.auth import require_key
+from backend.auth import expected_key, require_key
 
 
 def _load_local_env() -> None:
@@ -29,12 +33,26 @@ _load_local_env()
 DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./dev.db")
 
 
-def build_app(db_url: str = DATABASE_URL) -> FastAPI:
+class Phase1Review(BaseModel):
+    reviewer: str = Field(..., min_length=1, max_length=64)
+    archive_type: str = Field(..., pattern="^(PATENT|LOW_VALUE|BUSINESS)$")
+    level1: str | None = None
+    level2: str | None = None
+    reason: str | None = Field(default=None, description="LOW_VALUE 时填 LV01-LV05")
+    note: str = ""
+
+
+def build_app(db_url: str | None = None) -> FastAPI:
+    from phase1 import ledger
+
+    db_url = db_url or os.environ.get("DATABASE_URL", DATABASE_URL)
     engine = make_engine(db_url)
     init_db(engine)
     sessions = make_session(engine)
-    app = FastAPI(title="900万PDF智能分类系统API", version="v1.0-planner")
+    app = FastAPI(title="900万PDF智能分类系统API", version="v3-phase1")
     app.state.sessions = sessions
+    app.state.engine = engine
+    metrics_cache: dict = {"at": 0.0, "body": ""}
 
     def db():
         s = sessions()
@@ -42,6 +60,64 @@ def build_app(db_url: str = DATABASE_URL) -> FastAPI:
             yield s
         finally:
             s.close()
+
+    @app.get("/healthz")
+    def healthz():
+        """不鉴权，给容器健康检查用。数据库连不上返回 503。"""
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(503, f"database unavailable: {type(exc).__name__}")
+        return {"ok": True, "api_key_configured": bool(expected_key())}
+
+    @app.get("/metrics", response_class=PlainTextResponse)
+    def metrics():
+        """Prometheus 文本格式，只有计数，不含路径。台账按 60 秒缓存，避免每次抓取都扫全表。"""
+        now = time.time()
+        if now - metrics_cache["at"] > 60:
+            data = ledger.summary(engine)
+            lines = ["# TYPE phase1_files gauge"]
+            lines += [f'phase1_files{{stage="{k}"}} {v}' for k, v in sorted(data["by_stage"].items())]
+            lines.append("# TYPE phase1_decisions gauge")
+            for key, value in sorted(data["by_decision"].items()):
+                archive_type, _, reason = key.partition("/")
+                reason = (reason or "").replace('"', "'")[:64]
+                lines.append(f'phase1_decisions{{archive_type="{archive_type}",reason="{reason}"}} {value}')
+            lines.append("# TYPE phase1_leased gauge")
+            lines.append(f"phase1_leased {data['leased']}")
+            metrics_cache.update(at=now, body="\n".join(lines) + "\n")
+        return metrics_cache["body"]
+
+    @app.get("/phase1/summary", dependencies=[Depends(require_key)])
+    def phase1_summary():
+        return ledger.summary(engine)
+
+    @app.get("/phase1/files", dependencies=[Depends(require_key)])
+    def phase1_files(stage: str | None = None, archive_type: str | None = None, reason: str | None = None,
+                     page: int = Query(1, ge=1), size: int = Query(50, ge=1, le=500)):
+        return ledger.list_rows(engine, stage=stage, archive_type=archive_type, reason=reason,
+                                page=page, size=size)
+
+    @app.get("/phase1/files/{row_id}", dependencies=[Depends(require_key)])
+    def phase1_file(row_id: int):
+        row = ledger.get(engine, row_id)
+        if not row:
+            raise HTTPException(404, "file not found")
+        return row
+
+    @app.post("/phase1/files/{row_id}/review", dependencies=[Depends(require_key)])
+    def phase1_review(row_id: int, body: Phase1Review):
+        """复核改判。改完回到 archive 阶段，归档进程把副本搬到新目录并删掉旧副本。"""
+        try:
+            return ledger.review(engine, row_id, reviewer=body.reviewer, archive_type=body.archive_type,
+                                 level1=body.level1, level2=body.level2, reason=body.reason, note=body.note)
+        except LookupError:
+            raise HTTPException(404, "file not found")
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc))
 
     @app.post("/tasks/scan", status_code=202, dependencies=[Depends(require_key)])
     def scan(req: ScanRequest, s: Session = Depends(db)):
@@ -87,7 +163,7 @@ def build_app(db_url: str = DATABASE_URL) -> FastAPI:
                 "result_type": r.result_type, "relevance_status": r.relevance_status,
                 "evidence_mode": r.evidence_mode, "level1": r.level1, "level2": r.level2,
                 "candidate_scores": r.candidate_scores, "decision_source": r.decision_source,
-                "classification_basis": r.classification_basis,
+                "classification_basis": r.classification_basis, "reason": r.reason,
                 "model_version": r.model_version, "taxonomy_version": r.taxonomy_version}
 
     @app.post("/results", status_code=201, dependencies=[Depends(require_key)])
@@ -107,18 +183,20 @@ def build_app(db_url: str = DATABASE_URL) -> FastAPI:
 
     @app.post("/review/{rid}", dependencies=[Depends(require_key)])
     def review(rid: int, patch: ReviewPatch, s: Session = Depends(db)):
-        r = store.apply_review(s, rid, patch.model_dump())
+        try:
+            r = store.apply_review(s, rid, patch.model_dump())
+        except ValueError as e:
+            raise HTTPException(400, str(e))
         if not r:
             raise HTTPException(404, "review item not found or not in MANUAL_REVIEW")
         return {"id": r.id, "reviewed_by": r.reviewed_by}
 
     @app.get("/taxonomy", dependencies=[Depends(require_key)])
     def taxonomy():
-        from classifier.knowledge import load_taxonomy
-        kb = load_taxonomy("contracts/taxonomy.yaml")
-        return {"taxonomy_version": kb["taxonomy_version"],
-                "level1": list(kb["level1"].keys()),
-                "l2_counts": {k: len(v) for k, v in kb["l2_by_l1"].items()}}
+        """阶段一归档用的 v3 类目（4 个一级、27 个二级、5 个低价值原因）。"""
+        from classifier.taxonomy_v3 import L1, L2, LOW5
+        return {"taxonomy_version": "v3", "level1": L1, "level2": L2, "low_value": LOW5,
+                "l2_counts": {k: len(v) for k, v in L2.items()}}
 
     return app
 

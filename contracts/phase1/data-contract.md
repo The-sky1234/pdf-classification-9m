@@ -8,7 +8,7 @@ FileRecord{file_id,source_path,source_sha256,bytes,mtime,batch_id,content_versio
 
 ProcessingTask{task_id,file_id,stage,content_version,task_origin}
 
-- `file_id`：一份源 PDF 的稳定身份，绑定规范路径，不绑定字节。新登记为 RFC 9562 UUIDv7，36 位小写、带连字符，列类型 TEXT，形态 `^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`。只在该规范路径第一次插入 `file_registry` 成功时留下，`id_origin=V7`。`source_path` 冲突则丢弃这枚尚未落库的 ID，读回已有行。
+- `file_id`：一份去重后源主件的稳定身份，不限 PDF，绑定规范路径，不绑定字节。清单外的精确重复副本不分配 `file_id`。新登记为 RFC 9562 UUIDv7，36 位小写、带连字符，列类型 TEXT，形态 `^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`。只在该规范路径第一次插入 `file_registry` 成功时留下，`id_origin=V7`。`source_path` 冲突则丢弃这枚尚未落库的 ID，读回已有行。
 - `task_id`：该 `file_id` 在某个 `stage` 的当前执行行。新行为另一枚 UUIDv7，`task_origin=V7`，且不得等于 `file_id`。`SCAN` 由 Backend 在首次插入该阶段时生成，其他阶段由 Scheduler 在首次插入时生成。唯一约束 `uq_processing_tasks_file_stage` 即 `UNIQUE(file_id, stage)`。失败重试与内容升版只改状态列，不换 `task_id`。
 - 历史行：`id_origin=LEGACY`、`task_origin=LEGACY`，列中原文为 32 位小写十六进制。允许 `file_id=task_id`。禁止改写成带连字符的 UUIDv7，禁止回写旧 `doc_tasks.task_id`。读出返回写入时的原文。
 - `batch_id`：`processing_batches.id`，数据库 SERIAL。只出现在批次行和 `batch_id` 外键里，不得当作 `file_id`。`file_registry.batch_id` 只记首次登记的批次，之后不改。整批重跑新建 `batch_no`，不得把已有批次的 `cursor_path` 改回空值。

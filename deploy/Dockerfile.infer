@@ -1,20 +1,22 @@
-# Infer worker：BGE-M3 + Reranker + 疑难LLM客户端（CUDA 12.1 / Python3.11；LLM走HTTP，不在容器内放权重）
-FROM nvcr.io/nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 DEBIAN_FRONTEND=noninteractive \
-    HF_HUB_OFFLINE=0
-RUN apt-get update && apt-get install -y --no-install-recommends python3.11 python3-pip libgomp1 \
- && rm -rf /var/lib/apt/lists/*
+# 分类波次：bge-m3 + bge-reranker-v2-m3。torch 的 cu121 wheel 自带 CUDA 运行库，基础镜像不需要 CUDA。
+# 模型挂在 ${MODEL_DIR}/hf → /models/hf，运行时 HF_HUB_OFFLINE=1，不联网。
+FROM python:3.11-slim-bookworm
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cu121
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PIP_INDEX_URL=${PIP_INDEX_URL} \
+    HOME=/home/app HF_HOME=/models/hf HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 && rm -rf /var/lib/apt/lists/*
 WORKDIR /srv/app
-COPY scheduler/requirements.txt ./sched-req.txt
-COPY classifier/requirements.txt ./clf-req.txt
-RUN pip3 install -r sched-req.txt -r clf-req.txt torch --index-url https://download.pytorch.org/whl/cu121 \
- && pip3 install "FlagEmbedding>=1.2" "sentence-transformers>=2.2"
-COPY parser ./parser
-COPY scheduler ./scheduler
+COPY deploy/requirements-common.txt deploy/requirements-infer.txt ./deploy/
+RUN pip install torch==2.4.1 --index-url ${TORCH_INDEX_URL} \
+ && pip install -r deploy/requirements-infer.txt
+COPY backend ./backend
 COPY classifier ./classifier
 COPY contracts ./contracts
-COPY deploy/worker_main.py ./deploy_worker_main.py
-RUN useradd -m -u 10001 app && chown -R app /srv/app
+COPY parser ./parser
+COPY phase1 ./phase1
+COPY scheduler ./scheduler
+COPY deploy/fetch_models.py ./deploy/
+RUN useradd -m -u 10001 app && chmod 1777 /home/app
 USER app
-ENV WORKER_ROLE=classify
-CMD ["python3", "deploy_worker_main.py"]
+CMD ["python", "-m", "phase1", "work", "--stage", "classify"]

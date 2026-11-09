@@ -32,23 +32,33 @@ class FilePayloadStore:
         safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in task_id)
         return os.path.join(self.root, f"{safe}.record.json")
 
+    @staticmethod
+    def _atomic_write(path: str, data) -> None:
+        """先写同目录临时文件再改名，进程中途被杀也不会留下半个 JSON。"""
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+
     def save(self, task_id: str, stage: str, payload: dict) -> str:
-        with open(self._payload_path(task_id), "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
+        self._atomic_write(self._payload_path(task_id), payload)
         ref = f"file://{self._payload_path(task_id)}"
-        assert len(ref) < MAX_QUEUE_REF_BYTES, "ref too large for queue"
+        if len(ref) >= MAX_QUEUE_REF_BYTES:
+            raise ValueError("ref too large for queue")
         self.save_record(HandoffRecord(task_id, payload.get("file_path", ""),
                                        stage, ref, updated_at=time.time()))
         return ref
 
     def load(self, ref: str) -> dict:
-        assert ref.startswith("file://"), f"unsupported ref: {ref[:20]}"
+        if not ref.startswith("file://"):
+            raise ValueError(f"unsupported ref: {ref[:20]}")
         with open(ref[len("file://"):], encoding="utf-8") as f:
             return json.load(f)
 
     def save_record(self, rec: HandoffRecord):
-        with open(self._record_path(rec.task_id), "w", encoding="utf-8") as f:
-            json.dump(asdict(rec), f, ensure_ascii=False)
+        self._atomic_write(self._record_path(rec.task_id), asdict(rec))
 
     def load_record(self, task_id: str) -> HandoffRecord:
         with open(self._record_path(task_id), encoding="utf-8") as f:

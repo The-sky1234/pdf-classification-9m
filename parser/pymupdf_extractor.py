@@ -2,6 +2,8 @@ from __future__ import annotations
 from parser.models import BBox, Span, PageContent
 from parser.detector import COMPLEX_MIN_SPAN_SIZES
 
+TABLE_MIN_DRAWINGS = 4
+
 
 def extract_pages(doc, max_pages: int = 0) -> tuple[list[PageContent], list[dict], list[dict], str]:
     pages: list[PageContent] = []
@@ -18,7 +20,9 @@ def extract_pages(doc, max_pages: int = 0) -> tuple[list[PageContent], list[dict
         sizes: set[float] = set()
         tables = 0
         try:
-            tables = len(page.find_tables().tables)
+            # find_tables 占整页解析时间的九成以上；没有矢量线条的页不可能有线框表格，直接跳过。
+            if len(page.get_cdrawings()) >= TABLE_MIN_DRAWINGS:
+                tables = len(page.find_tables().tables)
         except Exception:
             tables = 0
         for block in d.get("blocks", []):

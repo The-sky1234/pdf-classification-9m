@@ -1,7 +1,7 @@
 from __future__ import annotations
 import hashlib
 from datetime import datetime
-from sqlalchemy import Column, String, Integer, Text, DateTime, JSON, create_engine
+from sqlalchemy import BigInteger, Column, String, Integer, Text, DateTime, JSON, create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 Base = declarative_base()
@@ -48,44 +48,55 @@ class ClassificationResult(Base):
     reviewed_by = Column(String(128), nullable=True)
     reviewed_level1 = Column(String(32), nullable=True)
     reviewed_level2 = Column(String(32), nullable=True)
+    reason = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class ArchiveDecision(Base):
+    """与 backend/migrations/002、003 一致。PostgreSQL 上以迁移脚本为准，这里只给 SQLite 开发库建表。"""
     __tablename__ = "archive_decisions"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    file_id = Column(String(64), index=True)
-    version = Column(Integer, default=1)
-    archive_type = Column(String(32))
-    level1 = Column(String(32), nullable=True)
-    level2 = Column(String(32), nullable=True)
-    reason = Column(String(32), nullable=True)
+    file_id = Column(Text, nullable=False, index=True)
+    version = Column(Integer, nullable=False, default=1)
+    content_version = Column(Integer, nullable=True)
+    archive_type = Column(Text, nullable=False)
+    decision_status = Column(Text, nullable=False)
+    level1 = Column(Text, nullable=True)
+    level2 = Column(Text, nullable=True)
+    reason = Column(Text, nullable=True)
     target_dir = Column(Text, nullable=True)
     target_file = Column(Text, nullable=True)
     target_sha256 = Column(String(64), nullable=True)
     source_sha256 = Column(String(64), nullable=True)
-    approved = Column(Integer, default=0)
+    approved = Column(Integer, nullable=False, default=0)
 
 
 class ArchiveExecution(Base):
     __tablename__ = "archive_executions"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    decision_id = Column(Integer, index=True)
-    file_id = Column(String(64), index=True)
+    decision_id = Column(Integer, nullable=False, index=True)
+    file_id = Column(Text, nullable=False, index=True)
+    content_version = Column(Integer, nullable=True)
     tmp_path = Column(Text, nullable=True)
-    final_path = Column(Text, nullable=True, unique=True)
+    # 迁移里只有 status=COMPLETED 时 final_path 唯一（部分索引），这里不能整列 unique。
+    final_path = Column(Text, nullable=True)
     source_sha256 = Column(String(64), nullable=True)
     target_sha256 = Column(String(64), nullable=True)
-    bytes_ok = Column(Integer, default=0)
-    sha_ok = Column(Integer, default=0)
-    src_unchanged = Column(Integer, default=0)
-    checksum_verified = Column(Integer, default=0)
-    status = Column(String(32), default="QUEUED", index=True)
+    target_bytes = Column(BigInteger, nullable=True)
+    bytes_ok = Column(Integer, nullable=False, default=0)
+    sha_ok = Column(Integer, nullable=False, default=0)
+    src_unchanged = Column(Integer, nullable=False, default=0)
+    checksum_verified = Column(Integer, nullable=False, default=0)
+    status = Column(Text, nullable=False, default="QUEUED", index=True)
+    completed_at = Column(DateTime, nullable=True)
 
 
 def make_engine(url: str):
-    connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
-    return create_engine(url, connect_args=connect_args, future=True)
+    if url.startswith("sqlite"):
+        return create_engine(url, connect_args={"check_same_thread": False}, future=True)
+    from phase1.ledger import PG_CONNECT_ARGS
+
+    return create_engine(url, connect_args=PG_CONNECT_ARGS, pool_pre_ping=True, future=True)
 
 
 def make_session(engine):
@@ -93,4 +104,14 @@ def make_session(engine):
 
 
 def init_db(engine):
-    Base.metadata.create_all(engine)
+    """SQLite（开发、测试）直接建表；PostgreSQL 只跑迁移脚本，绝不 create_all。
+
+    先 create_all 再迁移会建出没有 CHECK、列也对不上的表，002 随后就会失败。
+    """
+    from phase1 import ledger
+
+    if engine.dialect.name == "sqlite":
+        Base.metadata.create_all(engine)
+        ledger.metadata.create_all(engine)
+        return
+    ledger.ensure_schema(engine)

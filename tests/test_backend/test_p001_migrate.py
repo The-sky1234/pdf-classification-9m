@@ -4,7 +4,7 @@ def test_p001():
     Base.metadata.create_all(e)
     from sqlalchemy.orm import Session
     s = Session(e)
-    d = ArchiveDecision(file_id="f1", version=1, archive_type="PATENT", approved=1, source_sha256="s")
+    d = ArchiveDecision(file_id="f1", version=1, archive_type="PATENT", decision_status="APPROVED", approved=1, source_sha256="s")
     s.add(d); s.commit()
     x = ArchiveExecution(decision_id=d.id, file_id="f1", final_path="/r/a.pdf", source_sha256="s", target_sha256="s", bytes_ok=1, sha_ok=1, src_unchanged=1, checksum_verified=1, status="COMPLETED")
     s.add(x); s.commit()

@@ -1,0 +1,5 @@
+# 本地跑单元测试（不需要 GPU，也不需要模型）
+-r requirements-api.txt
+httpx==0.28.1
+pytest==9.1.1
+numpy==1.26.4

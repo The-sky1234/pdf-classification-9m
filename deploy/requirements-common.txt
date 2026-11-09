@@ -1,0 +1,6 @@
+# 所有镜像共用。版本全部固定，升级前先在测试机上跑 pytest 和一小批真实文件。
+# 2.1 起要求 Python 3.11，OCR 镜像是 3.10
+SQLAlchemy==2.0.57
+psycopg2-binary==2.9.13
+pymupdf==1.28.2
+PyYAML==6.0.3

@@ -1,3 +1,4 @@
+import pytest
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))) if False else ".")
 from classifier.pipeline import ClassificationPipeline
@@ -94,3 +95,35 @@ def test_vision_stricter_and_basis_kept():
     r = pipe().run(P("", [], pdf_type="IMAGE_PDF", mode="VISION",
                      visual="图中有消防车与建筑火灾隐患标识"))
     assert "classification_basis" in r and r["evidence_mode"] == "VISION"
+
+
+def test_llm_answer_by_description_maps_back_to_id():
+    """候选给大模型时带说明；大模型回 ID 或回说明原文都要认，不能一律当成新类目拒掉。"""
+    from classifier.levels import classify_l1
+
+    class _ByName:
+        def choose(self, evidence, options, allow_uncertain=True, descriptions=None):
+            assert options == ["L1_AQSC", "L1_YJJY"] and descriptions["L1_YJJY"] == "应急救援"
+            return {"choice": "应急救援"}
+
+    class _Flat:
+        model_version = "flat"
+
+        def score(self, query, candidates):
+            return [0.1 for _ in candidates]
+
+    out = classify_l1("关于报送2024年度烟花爆竹经营单位名单的函", {"L1_AQSC": "安全生产", "L1_YJJY": "应急救援"},
+                      _Flat(), _ByName(), Thresholds())
+    assert out["level1"] == "L1_YJJY" and out["source"] == "LLM_JUDGE"
+
+
+def test_thresholds_file(tmp_path):
+    import json
+    path = tmp_path / "th.json"
+    path.write_text(json.dumps({"calibrated": True, "l2_direct_min": 0.6}), encoding="utf-8")
+    th = Thresholds.load(str(path))
+    assert th.calibrated and th.l2_direct_min == 0.6
+    path.write_text(json.dumps({"calibratd": True}), encoding="utf-8")
+    with pytest.raises(ValueError):
+        Thresholds.load(str(path))
+    assert Thresholds.load("").calibrated is False
