@@ -77,5 +77,58 @@ def _from_csv(list_path: str, encoding: str):
             }
 
 
+def parse_maps(specs: list[str]) -> list[tuple[str, str]]:
+    """「旧前缀=新前缀」。清单是在别的挂载点上生成的时候，把路径换成服务器上看得到的样子。"""
+    maps = []
+    for spec in specs:
+        old, sep, new = spec.partition("=")
+        if not sep or not old:
+            raise ValueError(f"--map 写成 旧前缀=新前缀：{spec}")
+        maps.append((old, new))
+    return sorted(maps, key=lambda m: len(m[0]), reverse=True)
+
+
+def remap(path: str, maps: list[tuple[str, str]]) -> str:
+    for old, new in maps:
+        if path.startswith(old):
+            tail = path[len(old):].replace("\\", "/")
+            return new.rstrip("/") + "/" + tail.lstrip("/")
+    return path
+
+
+def under_roots(path: str, roots: list[str]) -> bool:
+    return any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
+
+
+def iter_mapped_rows(list_path: str, maps: list[tuple[str, str]]):
+    for row in iter_master_rows(list_path):
+        if maps:
+            row["source_path"] = remap(row["source_path"], maps)
+        yield row
+
+
+def preflight(list_path: str, maps: list[tuple[str, str]], roots: list[str], sample: int) -> dict:
+    """入库前整份过一遍：不在挂载根下的路径数、前 sample 条里打不开的路径数，各带几个例子。"""
+    total = outside = checked = missing = 0
+    outside_eg: list[str] = []
+    missing_eg: list[str] = []
+    for row in iter_mapped_rows(list_path, maps):
+        total += 1
+        path = row["source_path"]
+        if roots and not under_roots(path, roots):
+            outside += 1
+            if len(outside_eg) < 5:
+                outside_eg.append(path)
+            continue
+        if checked < sample:
+            checked += 1
+            if not os.path.isfile(path):
+                missing += 1
+                if len(missing_eg) < 5:
+                    missing_eg.append(path)
+    return {"total": total, "outside_roots": outside, "outside_examples": outside_eg,
+            "checked": checked, "missing": missing, "missing_examples": missing_eg}
+
+
 def missing_paths(paths) -> list[str]:
     return [path for path in paths if not os.path.isfile(path)]

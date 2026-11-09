@@ -181,9 +181,10 @@ def test_archive_never_overwrites(tmp_path):
         copy_into(squatter, str(root), "01_专利文件/")
 
 
-def test_export_and_cli(env, capsys):
+def test_export_and_cli(env, capsys, monkeypatch):
     from phase1.__main__ import main
 
+    monkeypatch.delenv("SOURCE_ROOTS", raising=False)
     assert main(["--db", env["url"], "load", "--masters", str(env["masters"])]) == 0
     assert main(["--db", env["url"], "work", "--stage", "cpu", "--until-empty"]) == 0
     assert main(["--db", env["url"], "status"]) == 0
@@ -191,3 +192,23 @@ def test_export_and_cli(env, capsys):
     assert main(["--db", env["url"], "export", "--out", str(out)]) == 0
     rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
     assert len(rows) == 7 and all("evidence" not in r for r in rows)
+
+
+def test_load_preflight_rejects_paths_outside_roots(env, monkeypatch):
+    from phase1.__main__ import main
+
+    monkeypatch.delenv("SOURCE_ROOTS", raising=False)
+    elsewhere = str(env["tmp"] / "nas")
+    assert main(["--db", env["url"], "load", "--masters", str(env["masters"]), "--roots", elsewhere]) == 2
+    assert ledger.summary(env["engine"])["total"] == 0
+
+    win = env["tmp"] / "win.txt"
+    win.write_text("Z:\\共享\\flood.txt\nZ:\\共享\\other.txt\n", encoding="utf-8")
+    src = str(env["src"])
+    assert main(["--db", env["url"], "load", "--masters", str(win), "--roots", src]) == 2
+    assert main(["--db", env["url"], "load", "--masters", str(win), "--roots", src,
+                 "--map", "Z:\\共享=" + src + "/nope"]) == 2
+    assert main(["--db", env["url"], "load", "--masters", str(win), "--roots", src,
+                 "--map", "Z:\\共享=" + src]) == 0
+    loaded = sorted(r["source_path"] for r in ledger.iter_all(env["engine"]))
+    assert loaded == [os.path.join(src, "flood.txt"), os.path.join(src, "other.txt")]

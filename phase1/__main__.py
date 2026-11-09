@@ -33,6 +33,31 @@ def _db(args) -> str:
     return url
 
 
+def _load(args) -> int:
+    from phase1.masters import iter_mapped_rows, parse_maps, preflight
+
+    maps = parse_maps(args.map)
+    roots = [r for r in (args.roots or os.environ.get("SOURCE_ROOTS", "")).split(os.pathsep) if r]
+    report = preflight(args.masters, maps, roots, args.check)
+    print(json.dumps({"preflight": report}, ensure_ascii=False, indent=1))
+    if report["total"] == 0:
+        print("清单是空的", file=sys.stderr)
+        return 2
+    if report["outside_roots"]:
+        print(f"有 {report['outside_roots']} 条路径不在 {roots} 下，worker 读不到。"
+              "用 --map 换前缀，或改 SOURCE_ROOTS / 挂载目录", file=sys.stderr)
+        return 2
+    if report["checked"] and report["missing"] == report["checked"]:
+        print("抽查的路径一个都打不开，多半是挂载点或 --map 不对", file=sys.stderr)
+        return 2
+    if args.dry_run:
+        return 0
+    engine = ledger.make_engine(_db(args))
+    ledger.ensure_schema(engine)
+    print(json.dumps(ledger.load_masters(engine, iter_mapped_rows(args.masters, maps)), ensure_ascii=False))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="phase1")
     parser.add_argument("--db", default="", help="默认读 DATABASE_URL")
@@ -42,6 +67,11 @@ def main(argv: list[str] | None = None) -> int:
 
     load = sub.add_parser("load", help="把主件清单灌进台账，可重复执行")
     load.add_argument("--masters", required=True, help="masters.csv，或一行一个路径的文本")
+    load.add_argument("--map", action="append", default=[], metavar="旧前缀=新前缀",
+                      help="清单路径前缀替换，可多次给出；反斜杠一并换成 /")
+    load.add_argument("--roots", default="", help="路径必须落在这些目录下，冒号分隔；默认读 SOURCE_ROOTS")
+    load.add_argument("--check", type=int, default=200, help="入库前抽查前 N 个路径是否存在，0 不查")
+    load.add_argument("--dry-run", action="store_true", help="只做检查，不入库")
 
     work = sub.add_parser("work", help="跑一个或几个波次")
     work.add_argument("--stage", action="append", choices=ledger.WORK_STAGES, required=True)
@@ -77,17 +107,13 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(counts, ensure_ascii=False))
         return 0
 
+    if args.cmd == "load":
+        return _load(args)
+
     url = _db(args)
     if args.cmd == "init-db":
         ledger.ensure_schema(ledger.make_engine(url))
         print("schema ok")
-        return 0
-    if args.cmd == "load":
-        from phase1.masters import iter_master_rows
-
-        engine = ledger.make_engine(url)
-        ledger.ensure_schema(engine)
-        print(json.dumps(ledger.load_masters(engine, iter_master_rows(args.masters)), ensure_ascii=False))
         return 0
     if args.cmd == "work":
         from phase1.waves import run_workers
