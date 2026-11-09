@@ -7,6 +7,7 @@
 1. load   只读 20 个 CSV，按文件大小找出可能重复的候选。不连存储机。
 2. hash   只对候选算 SHA-256。默认让存储机本地算，网络只回哈希。
 3. report 写出精确重复组。主件只做标记，不删除、不移动源文件。
+4. masters 写出全部主件清单（每组留一份，其余文件全保留），交给阶段一 load。
 
 大小不同的文件不会进入 hash。大小相同只说明「可能相同」，报告里的组必须哈希一致。
 """
@@ -118,17 +119,40 @@ def resolve_field(fieldnames, keys):
 
 
 def open_text(path: str):
-    last = None
+    """整份文件都能按 UTF-8 解开才用 UTF-8，否则按 GB18030。只看开头会在中途遇到 GBK 行时崩掉。"""
     for encoding in ("utf-8-sig", "gb18030"):
-        handle = open(path, "r", encoding=encoding, newline="")
         try:
-            handle.read(8192)
-            handle.seek(0)
-            return handle, encoding
-        except UnicodeDecodeError as exc:
-            last = exc
-            handle.close()
-    raise last
+            with open(path, "r", encoding=encoding, newline="") as probe:
+                while probe.read(8 * 1024 * 1024):
+                    pass
+        except UnicodeDecodeError:
+            continue
+        return open(path, "r", encoding=encoding, newline=""), encoding
+    raise UnicodeDecodeError("gb18030", b"", 0, 1, f"{path} 既不是 UTF-8 也不是 GB18030")
+
+
+_MTIME_FORMATS = (
+    "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M",
+    "%Y/%m/%d", "%Y-%m-%dT%H:%M:%S", "%Y年%m月%d日 %H:%M:%S", "%Y年%m月%d日",
+)
+
+
+def normalize_mtime(raw: str) -> str:
+    """统一成 YYYY-MM-DD HH:MM:SS，按字符串排序才等于按时间排序。认不出的原样保留并加 ? 前缀排到最后。"""
+    import datetime as _dt
+
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    if value.replace(".", "", 1).isdigit() and len(value.split(".")[0]) >= 9:
+        return _dt.datetime.fromtimestamp(float(value), _dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    head = value.split(".")[0].split("+")[0].rstrip("Z")
+    for fmt in _MTIME_FORMATS:
+        try:
+            return _dt.datetime.strptime(head, fmt).strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+    return "?" + value
 
 
 def normalize_ext(ext: str, path: str) -> str:
@@ -332,7 +356,7 @@ def cmd_load(args: argparse.Namespace) -> None:
                     filtered_ext += 1
                     continue
                 file_name = (row.get(name_key) or "").strip() if name_key else os.path.basename(path)
-                mtime = (row.get(mtime_key) or "").strip() if mtime_key else ""
+                mtime = normalize_mtime(row.get(mtime_key) or "") if mtime_key else ""
                 batch.append((path, size, file_name, normalize_ext(ext, path), mtime))
                 kept += 1
                 if len(batch) >= 20000:
@@ -666,7 +690,7 @@ def cmd_report(args: argparse.Namespace) -> None:
             FROM files
             WHERE hash_status = 'OK' AND sha256 IS NOT NULL
             ORDER BY sha256,
-                     CASE WHEN mtime IS NULL OR mtime = '' THEN 1 ELSE 0 END,
+                     CASE WHEN mtime IS NULL OR mtime = '' OR mtime LIKE '?%' THEN 1 ELSE 0 END,
                      mtime,
                      path
             """
@@ -728,6 +752,70 @@ def cmd_report(args: argparse.Namespace) -> None:
     conn.close()
 
 
+MASTER_SQL = """
+    WITH ranked AS (
+        SELECT f.path, f.size, f.ext, f.hash_status, f.sha256,
+               CASE WHEN c.size IS NULL THEN 0 ELSE 1 END AS collided,
+               ROW_NUMBER() OVER (
+                   PARTITION BY CASE WHEN f.hash_status = 'OK' AND c.size IS NOT NULL THEN f.sha256 ELSE f.path END
+                   ORDER BY CASE WHEN f.mtime IS NULL OR f.mtime = '' OR f.mtime LIKE '?%' THEN 1 ELSE 0 END,
+                            f.mtime, f.path
+               ) AS rn,
+               COUNT(*) OVER (
+                   PARTITION BY CASE WHEN f.hash_status = 'OK' AND c.size IS NOT NULL THEN f.sha256 ELSE f.path END
+               ) AS members
+        FROM files f LEFT JOIN collision_size c ON c.size = f.size
+    )
+    SELECT path, size, ext, hash_status, collided, members
+    FROM ranked
+    WHERE rn = 1
+    ORDER BY path
+"""
+
+
+def master_source(row) -> str:
+    if row["hash_status"] == "PATH_CONFLICT":
+        return "大小矛盾"
+    if not row["collided"]:
+        return "大小唯一"
+    if row["hash_status"] == "OK":
+        return "精确组主件" if row["members"] > 1 else "哈希唯一"
+    if row["hash_status"] == "ERR":
+        return "哈希失败"
+    return "未哈希"
+
+
+def cmd_masters(args: argparse.Namespace) -> None:
+    """写出阶段一要处理的全部主件：每个精确重复组留一份，其余文件全部保留。"""
+    out_dir = os.path.expanduser(args.out)
+    db_path = os.path.join(out_dir, "dedup.sqlite")
+    if not os.path.exists(db_path):
+        sys.exit("还没有预筛库。先运行 load。")
+    conn = connect(db_path)
+    rebuild_collisions(conn)
+    pending = conn.execute(
+        "SELECT COUNT(*) FROM files f JOIN collision_size c ON c.size = f.size WHERE f.hash_status IS NULL"
+    ).fetchone()[0]
+    if pending and not args.allow_incomplete:
+        sys.exit(f"还有 {pending} 个碰撞文件没算哈希。先跑完 hash；确实要先出清单时加 --allow-incomplete，"
+                 "这些文件会以「未哈希」来源全部保留。")
+    path = os.path.join(out_dir, "masters.csv")
+    counts: dict[str, int] = {}
+    with open(path + ".part", "w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["完整路径", "文件大小_字节", "扩展名", "来源"])
+        for row in conn.execute(MASTER_SQL):
+            source = master_source(row)
+            counts[source] = counts.get(source, 0) + 1
+            writer.writerow([row["path"], row["size"], row["ext"] or "", source])
+    os.replace(path + ".part", path)
+    total = sum(counts.values())
+    print(f"主件 {total} 份，已写入 {path}")
+    for key, value in sorted(counts.items(), key=lambda kv: -kv[1]):
+        print(f"  {key}: {value}")
+    conn.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="用文件清单做字节级精确去重，不读取 PDF 文本。")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -753,6 +841,11 @@ def build_parser() -> argparse.ArgumentParser:
     report = sub.add_parser("report", help="写出精确重复组")
     report.add_argument("--out", required=True)
     report.set_defaults(func=cmd_report)
+
+    masters = sub.add_parser("masters", help="写出全部主件清单 masters.csv，给阶段一 load 用")
+    masters.add_argument("--out", required=True)
+    masters.add_argument("--allow-incomplete", action="store_true", help="碰撞文件还没哈希完也先出清单")
+    masters.set_defaults(func=cmd_masters)
     return parser
 
 
