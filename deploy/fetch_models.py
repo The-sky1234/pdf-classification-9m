@@ -2,6 +2,7 @@
 
     python deploy/fetch_models.py ocr      # PaddleOCR 检测/方向/识别模型 → ~/.paddleocr
     python deploy/fetch_models.py infer    # bge-m3、bge-reranker-v2-m3 → $HF_HOME
+    python deploy/fetch_models.py llm      # 本地大模型兜底 $LLM_MODEL（如 Qwen/Qwen2.5-7B-Instruct，约 15GB）
 
 ops.sh fetch-models 会在对应镜像里各跑一次。国内网络可设 HF_ENDPOINT=https://hf-mirror.com。
 """
@@ -41,13 +42,27 @@ def fetch_infer() -> None:
         print(f"{name} -> {path} ({time.time() - t:.0f}s)")
 
 
+def fetch_llm() -> None:
+    os.environ.pop("HF_HUB_OFFLINE", None)
+    from huggingface_hub import snapshot_download
+
+    name = os.environ.get("LLM_MODEL", "")
+    if not name:
+        raise SystemExit("LLM_MODEL 没有设置")
+    t = time.time()
+    path = snapshot_download(name, ignore_patterns=HF_IGNORE + ["original/*", "*.pth", "*.gguf"])
+    print(f"{name} -> {path} ({time.time() - t:.0f}s)")
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) != 1 or argv[0] not in ("ocr", "infer"):
+    if len(argv) != 1 or argv[0] not in ("ocr", "infer", "llm"):
         print(__doc__)
         return 2
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     if argv[0] == "ocr":
         fetch_ocr()
+    elif argv[0] == "llm":
+        fetch_llm()
     else:
         fetch_infer()
     return 0

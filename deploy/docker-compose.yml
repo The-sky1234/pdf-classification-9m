@@ -160,10 +160,12 @@ services:
       EMBED_MODEL: ${EMBED_MODEL:-BAAI/bge-m3}
       RERANK_MODEL: ${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
       THRESHOLDS_FILE: ${THRESHOLDS_FILE:-}
-      LLM_ENDPOINT: ${LLM_ENDPOINT:-}
+      # LLM_ENDPOINT 留空就用下面的本地 llm 服务；LLM_MODEL 留空或 LLM_MAX_CALLS=0 表示不用大模型
+      LLM_ENDPOINT: ${LLM_ENDPOINT:-http://llm:8000/v1}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-}
       LLM_MAX_CALLS: ${LLM_MAX_CALLS:-0}
+      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-32}
     volumes:
       - ${DATA_DIR:?}/locks:/data/locks
       - ${DATA_DIR:?}/config:/config:ro
@@ -171,6 +173,43 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     shm_size: 4g
+    deploy:
+      resources:
+        reservations: *gpu
+
+  # 可选的大模型兜底：向量 + 重排拿不准时，让大模型在候选里选一个或回答拿不准。
+  # 只在分类波次期间运行（ops.sh wave classify 先起它、等就绪再起 classify-worker），OCR 波次时停掉让出显存。
+  llm:
+    profiles: ["llm"]
+    image: vllm/vllm-openai:${VLLM_TAG:-v0.6.6.post1}
+    command:
+      - --model
+      - ${LLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      - --served-model-name
+      - ${LLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      - --gpu-memory-utilization
+      - "${LLM_GPU_UTIL:-0.40}"
+      - --max-model-len
+      - "8192"
+      - --max-num-seqs
+      - "16"
+      - --disable-log-requests
+    environment:
+      HF_HUB_OFFLINE: "1"
+      VLLM_NO_USAGE_STATS: "1"
+    volumes:
+      - ${MODEL_DIR:?}/hf:/root/.cache/huggingface
+    ipc: host
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 3
+      start_period: 900s
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: {max-size: 100m, max-file: "3"}
     deploy:
       resources:
         reservations: *gpu

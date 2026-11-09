@@ -4,7 +4,7 @@
 #   ./ops.sh init                    建目录、改属主（首次）
 #   ./ops.sh check                   查驱动、显卡、容器 GPU、目录、磁盘
 #   ./ops.sh build [api|ocr|infer]   构建镜像，不给参数就全部
-#   ./ops.sh fetch-models            下载 OCR 和分类模型到 MODEL_DIR（只需联网一次）
+#   ./ops.sh fetch-models            下载 OCR、分类模型（开了本地大模型时连它一起）到 MODEL_DIR
 #   ./ops.sh up                      起 postgres、api、cpu-worker（波次 0 + 归档）
 #   ./ops.sh load 清单 [load 参数]    主件清单入库，例如 --map 'D:\共享=/mnt/nas/共享'
 #   ./ops.sh wave ocr|classify|off   切换 GPU 波次（同一时间只开一个）
@@ -26,7 +26,26 @@ set -a
 set +a
 
 dc() { docker compose "$@"; }
-gpu_dc() { docker compose --profile ocr --profile classify "$@"; }
+gpu_dc() { docker compose --profile ocr --profile classify --profile llm "$@"; }
+
+# 配了 LLM_MODEL、LLM_MAX_CALLS>0、没填外部 LLM_ENDPOINT 时，由本机 llm 服务（vLLM）兜底
+local_llm() {
+  [ -n "${LLM_MODEL:-}" ] && [ "${LLM_MAX_CALLS:-0}" -gt 0 ] && [ -z "${LLM_ENDPOINT:-}" ]
+}
+
+wait_llm() {
+  echo "等待大模型服务就绪（首次加载要几分钟）…"
+  for _ in $(seq 1 120); do
+    case "$(docker inspect -f '{{.State.Health.Status}}' "$(gpu_dc ps -q llm)" 2>/dev/null)" in
+      healthy) echo "大模型服务已就绪"; return 0 ;;
+      unhealthy) break ;;
+    esac
+    sleep 10
+  done
+  echo "大模型服务没有起来，看 ./ops.sh logs llm。本次分类不用大模型，拿不准的转人工复核" >&2
+  gpu_dc stop llm >/dev/null 2>&1 || true
+  return 1
+}
 phase1() { dc exec -T api python -m phase1 "$@"; }
 
 pending() {
@@ -35,9 +54,13 @@ pending() {
 
 wave() {
   case "$1" in
-    ocr) gpu_dc stop classify-worker >/dev/null 2>&1 || true; gpu_dc up -d --no-build ocr-worker ;;
-    classify) gpu_dc stop ocr-worker >/dev/null 2>&1 || true; gpu_dc up -d --no-build classify-worker ;;
-    off) gpu_dc stop ocr-worker classify-worker >/dev/null 2>&1 || true ;;
+    ocr) gpu_dc stop classify-worker llm >/dev/null 2>&1 || true; gpu_dc up -d --no-build ocr-worker ;;
+    classify)
+      gpu_dc stop ocr-worker >/dev/null 2>&1 || true
+      if local_llm; then gpu_dc up -d --no-build llm && wait_llm || true; fi
+      gpu_dc up -d --no-build classify-worker
+      ;;
+    off) gpu_dc stop ocr-worker classify-worker llm >/dev/null 2>&1 || true ;;
     *) echo "wave ocr|classify|off"; exit 2 ;;
   esac
 }
@@ -63,6 +86,7 @@ case "$cmd" in
       all) dc build api && gpu_dc build ocr-worker classify-worker ;;
       *) echo "build api|ocr|infer"; exit 2 ;;
     esac
+    if local_llm; then gpu_dc pull llm; fi
     ;;
   fetch-models)
     # 只下载，不上卡：不走 compose 的 GPU 预留，驱动和 nvidia-container-toolkit 没配好也能先下
@@ -73,6 +97,11 @@ case "$cmd" in
       -e HF_ENDPOINT="${HF_ENDPOINT:-https://huggingface.co}" \
       -e EMBED_MODEL="${EMBED_MODEL:-BAAI/bge-m3}" -e RERANK_MODEL="${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}" \
       -v "$MODEL_DIR/hf:/models/hf" "pdfcls-infer:${IMAGE_TAG:-latest}" python deploy/fetch_models.py infer
+    if local_llm; then
+      docker run --rm --user "$user" -e HF_HUB_OFFLINE=0 -e HF_ENDPOINT="${HF_ENDPOINT:-https://huggingface.co}" \
+        -e LLM_MODEL="$LLM_MODEL" -v "$MODEL_DIR/hf:/models/hf" "pdfcls-infer:${IMAGE_TAG:-latest}" \
+        python deploy/fetch_models.py llm
+    fi
     ;;
   up)
     dc up -d --no-build postgres api cpu-worker

@@ -115,7 +115,31 @@ tmux new -s autopilot './ops.sh autopilot'
 
 ### 大模型兜底（可选）
 
-`LLM_ENDPOINT` 填任意 OpenAI 兼容接口，比如 vLLM。宿主机上的服务写 `http://host.docker.internal:端口/v1`。`LLM_MAX_CALLS` 是调用次数上限，超过以后一律转人工复核。
+向量 + 重排拿不准的文件，再给大模型一次机会：把候选类目编号列出来，让它只回答一个数字，或者回答 0 表示拿不准。它也拿不准，或者答到候选之外，就转人工复核。默认关闭。
+
+推荐在本机部署 Qwen2.5-7B-Instruct（vLLM v0.6.6.post1，显卡上约占 19GB），数据不出服务器。在 `.env` 里这样填：
+
+```
+LLM_MODEL=Qwen/Qwen2.5-7B-Instruct
+LLM_MAX_CALLS=200000
+LLM_ENDPOINT=
+```
+
+然后执行：
+
+```bash
+./ops.sh build          # 会额外拉取 vLLM 镜像（约 10GB）
+./ops.sh fetch-models   # 会额外下载 Qwen2.5-7B-Instruct（约 15GB）
+```
+
+开启后，下面这些都是自动的：
+- `./ops.sh wave classify` 和 `autopilot` 先启动大模型，等它就绪后再启动分类；切到 OCR 波次时停掉大模型，让出显存。
+- 大模型启动失败，这一轮分类就不用它，拿不准的转人工复核。
+- 运行中大模型连不上，会先重试；重试仍失败，5 分钟内跳过它，不会拖慢整个波次。
+
+用外部服务时，填 `LLM_ENDPOINT`（OpenAI 兼容地址）和 `LLM_API_KEY`，`ops.sh` 就不会再启动本地大模型。不要用 Qwen3、DeepSeek-R1 这类带思考过程的模型。
+
+实测参考：在 CPU 上用 llama.cpp 运行 Qwen2.5-7B-Instruct 的 Q4 量化版，测了 8 份故意让大模型判断的文件。一级全对。二级 6 份对、1 份拿不准转人工、1 份判错（安全培训考试被判成消防监管）。阈值签发生效后，大模型的判断会直接进业务目录。所以签发前，先用标注样本抽查大模型参与判断的那部分（台账 `scores` 里 `l1_source` 或 `l2_source` 为 `LLM_JUDGE`）的准确率。
 
 ## 6. 故障处理
 

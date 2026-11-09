@@ -50,6 +50,21 @@ def test_workers_share_ledger_and_paths(compose):
     assert {"cpu", "archive"} <= set(cpu["command"])
 
 
+def test_optional_llm_service(compose):
+    llm = compose["services"]["llm"]
+    assert llm["profiles"] == ["llm"], "大模型默认不启动"
+    assert re.fullmatch(r"vllm/vllm-openai:\$\{VLLM_TAG:-v[\d.]+(post\d+)?\}", llm["image"])
+    assert llm["environment"]["HF_HUB_OFFLINE"] == "1"
+    assert "${MODEL_DIR:?}/hf:/root/.cache/huggingface" in llm["volumes"]
+    assert llm["deploy"]["resources"]["reservations"]["devices"][0]["capabilities"] == ["gpu"]
+    assert "ports" not in llm, "只给容器网络内的分类进程用"
+    env = compose["services"]["classify-worker"]["environment"]
+    assert env["LLM_ENDPOINT"] == "${LLM_ENDPOINT:-http://llm:8000/v1}"
+    assert env["LLM_MAX_CALLS"] == "${LLM_MAX_CALLS:-0}", "默认不调用大模型"
+    ops = _read("ops.sh")
+    assert "stop classify-worker llm" in ops, "切到 OCR 波次要停掉大模型让出显存"
+
+
 def test_commands_match_cli(compose):
     from phase1 import ledger
 
