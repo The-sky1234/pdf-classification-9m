@@ -35,3 +35,13 @@ def test_scene_classifier_respects_calibration(tmp_path):
     assert done.archive_type == "BUSINESS"
     assert done.level2 == "消防监管"
     assert done.target_dir == "03_业务分类/安全生产/消防监管/"
+
+
+def test_scene_descriptions_match_taxonomy():
+    from classifier.taxonomy_v3 import L2, scene_descriptions
+
+    data = scene_descriptions()
+    assert sum(len(v) for v in data["l2"].values()) == 27
+    for key, names in L2.items():
+        assert list(data["l2"][key]) == names
+    assert "双随机一公开" in data["l2"]["L1_AQSC"]["消防监管"]

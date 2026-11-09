@@ -1,9 +1,12 @@
+import pytest
 from classifier.taxonomy_v3 import L1,L2,LOW5,target_dir,all_l2
 def test_27():
     assert len(L1)==4 and len(all_l2())==27 and len(LOW5)==5
     assert target_dir("BUSINESS",None,"L1_ZHGL","纪检监察").endswith("纪检监察/")
-    try: target_dir("BUSINESS",None,"L1_AQSC","纪检监察"); assert False
-    except AssertionError: pass
+    with pytest.raises(ValueError):
+        target_dir("BUSINESS",None,"L1_AQSC","纪检监察")
+    with pytest.raises(ValueError):
+        target_dir("LOW_VALUE",None,reason="LV99")
 def test_archive(tmp_path):
     from scheduler.archive_worker import archive_copy
     import os

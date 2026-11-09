@@ -24,7 +24,8 @@ def test_rules_and_waves(tmp_path):
     meeting = tmp_path / "notice.txt"
     meeting.write_text("关于召开消防安全会议的通知，请各部门参加。", encoding="utf-8")
     patent = tmp_path / "patent.txt"
-    patent.write_text("发明专利 申请公布号 CN12345678A 说明书正文足够长。", encoding="utf-8")
+    patent.write_text("(19)中华人民共和国国家知识产权局 (12)发明专利申请 (10)申请公布号 CN112345678A "
+                      "(21)申请号 202010123456.7 (22)申请日 2020.03.01 说明书正文足够长。", encoding="utf-8")
     image = tmp_path / "scan.png"
     image.write_bytes(b"\x89PNG\r\n")
     packed = tmp_path / "bundle.zip"
@@ -78,7 +79,8 @@ def test_uncalibrated_does_not_enter_business_dir(tmp_path):
 
 def test_cpu_wave_writes_jsonl_and_archives_only_settled(tmp_path):
     patent = tmp_path / "p.txt"
-    patent.write_text("实用新型专利 授权公告号 CN87654321B 说明书正文。", encoding="utf-8")
+    patent.write_text("(19)国家知识产权局 (12)实用新型专利 (45)授权公告号 CN87654321U 说明书正文。",
+                      encoding="utf-8")
     meeting = tmp_path / "m.txt"
     meeting.write_text("请参加防汛会商，正文足够长，讨论物资调度。", encoding="utf-8")
     masters = tmp_path / "masters.txt"
