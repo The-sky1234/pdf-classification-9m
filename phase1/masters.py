@@ -1,9 +1,8 @@
-"""读取上游去重留下的主件清单。
+"""读取已经去重好的文件清单。阶段一不再去重，清单里每个路径处理一次。
 
 支持两种格式：
 - 一行一个路径的文本；
 - CSV，路径列叫「完整路径」等；有「是否主件」列时只取「是」；有「来源」「文件大小_字节」列时一并带上。
-  tools/dedup/exact_dedup_from_listing.py masters 输出的 masters.csv 就是这种。
 编码按 UTF-8（可带 BOM）读，整份解不开再按 GB18030。
 """
 from __future__ import annotations
