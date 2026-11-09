@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
+"""按 all_files_*.csv 清单统计格式、大小、目录、年份，输出 HTML 和 TXT 报告。不打开文件本身。
+
+    python tools/inventory_report.py --src ~/all_file_lists --out ~/dedup-by-size
+"""
+import argparse
 import csv
 import html
 from collections import Counter
 from pathlib import Path
 
-HOME = Path.home()
-CANDIDATES = [HOME / "all_file_lists", HOME]
-SRC = next((p for p in CANDIDATES if any(p.glob("all_files_*.csv"))), HOME)
-OUT = HOME / "dedup-by-size"
-OUT.mkdir(parents=True, exist_ok=True)
 
 GROUPS = {
     "文档": {"pdf", "doc", "docx", "docm", "wps", "rtf", "odt", "ofd"},
@@ -52,8 +52,8 @@ def size_bucket(n):
     return 6
 
 
-def top_dir(path):
-    parts = [p for p in path.split("/") if p and p != "wangzengzheng"]
+def top_dir(path, skip=()):
+    parts = [p for p in path.replace("\\", "/").split("/") if p and p not in skip]
     return parts[0] if parts else "(根目录)"
 
 
@@ -71,128 +71,143 @@ def scene_of(text):
     return "未识别"
 
 
-files = total = empty = noext = 0
-ext_n, ext_b = Counter(), Counter()
-group_n, group_b = Counter(), Counter()
-dir_n, dir_b = Counter(), Counter()
-year_n, year_b = Counter(), Counter()
-scene_n, scene_b = Counter(), Counter()
-buckets_n, buckets_b = Counter(), Counter()
-largest = []
-csv_list = sorted(SRC.glob("all_files_*.csv"))
-if not csv_list:
-    raise SystemExit("no all_files_*.csv under %s" % SRC)
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="清单统计报告")
+    parser.add_argument("--src", default=str(Path.home() / "all_file_lists"), help="放 all_files_*.csv 的目录")
+    parser.add_argument("--out", default=str(Path.home() / "dedup-by-size"), help="报告输出目录")
+    parser.add_argument("--skip-dir", action="append", default=[], help="统计一级目录时跳过的路径段，可多次给出")
+    args = parser.parse_args(argv)
+    files = total = empty = noext = 0
+    ext_n, ext_b = Counter(), Counter()
+    group_n, group_b = Counter(), Counter()
+    dir_n, dir_b = Counter(), Counter()
+    year_n, year_b = Counter(), Counter()
+    scene_n, scene_b = Counter(), Counter()
+    buckets_n, buckets_b = Counter(), Counter()
+    largest = []
+    SRC = Path(args.src).expanduser()
+    OUT = Path(args.out).expanduser()
+    skip = set(args.skip_dir)
+    csv_list = sorted(SRC.glob("all_files_*.csv"))
+    if not csv_list:
+        raise SystemExit("no all_files_*.csv under %s" % SRC)
+    OUT.mkdir(parents=True, exist_ok=True)
 
-for csv_path in csv_list:
-    seen = 0
-    with csv_path.open(newline="", encoding="utf-8", errors="replace") as handle:
-        for row in csv.DictReader(handle):
-            path = (row.get("完整路径") or "").strip()
-            name = (row.get("文件名") or "").strip()
-            if not path:
-                continue
-            ext = (row.get("扩展名") or "").strip().lower().lstrip(".")
-            try:
-                size = int(float(row.get("文件大小_字节") or 0))
-            except ValueError:
-                size = 0
-            folder = top_dir(path)
-            year = year_of(row.get("修改时间") or "")
-            scene = scene_of(path + "/" + name)
-            group = EXT_GROUP.get(ext, "无扩展名" if not ext else "其他")
-            files += 1
-            total += size
-            seen += 1
-            if size <= 0:
-                empty += 1
-            if not ext:
-                noext += 1
-            key = ext or "(无扩展名)"
-            ext_n[key] += 1
-            ext_b[key] += size
-            group_n[group] += 1
-            group_b[group] += size
-            dir_n[folder] += 1
-            dir_b[folder] += size
-            year_n[year] += 1
-            year_b[year] += size
-            scene_n[scene] += 1
-            scene_b[scene] += size
-            b = size_bucket(size)
-            buckets_n[b] += 1
-            buckets_b[b] += size
-            if len(largest) < 30:
-                largest.append((size, path))
-                largest.sort(reverse=True)
-            elif size > largest[-1][0]:
-                largest[-1] = (size, path)
-                largest.sort(reverse=True)
-    print("read", csv_path.name, seen, flush=True)
-
-
-def tb(n):
-    return "%.2f TB" % (n / 1024 ** 4) if n >= 1024 ** 4 else "%.2f GB" % (n / 1024 ** 3)
-
-
-def row_html(cells):
-    return "<tr>" + "".join("<td>%s</td>" % html.escape(str(c)) for c in cells) + "</tr>"
-
-
-def table(headers, rows):
-    head = "".join("<th>%s</th>" % html.escape(h) for h in headers)
-    body = "".join(row_html(r) for r in rows)
-    return "<table><thead><tr>%s</tr></thead><tbody>%s</tbody></table>" % (head, body)
+    for csv_path in csv_list:
+        seen = 0
+        with csv_path.open(newline="", encoding="utf-8", errors="replace") as handle:
+            for row in csv.DictReader(handle):
+                path = (row.get("完整路径") or "").strip()
+                name = (row.get("文件名") or "").strip()
+                if not path:
+                    continue
+                ext = (row.get("扩展名") or "").strip().lower().lstrip(".")
+                try:
+                    size = int(float(row.get("文件大小_字节") or 0))
+                except ValueError:
+                    size = 0
+                folder = top_dir(path, skip)
+                year = year_of(row.get("修改时间") or "")
+                scene = scene_of(path + "/" + name)
+                group = EXT_GROUP.get(ext, "无扩展名" if not ext else "其他")
+                files += 1
+                total += size
+                seen += 1
+                if size <= 0:
+                    empty += 1
+                if not ext:
+                    noext += 1
+                key = ext or "(无扩展名)"
+                ext_n[key] += 1
+                ext_b[key] += size
+                group_n[group] += 1
+                group_b[group] += size
+                dir_n[folder] += 1
+                dir_b[folder] += size
+                year_n[year] += 1
+                year_b[year] += size
+                scene_n[scene] += 1
+                scene_b[scene] += size
+                b = size_bucket(size)
+                buckets_n[b] += 1
+                buckets_b[b] += size
+                if len(largest) < 30:
+                    largest.append((size, path))
+                    largest.sort(reverse=True)
+                elif size > largest[-1][0]:
+                    largest[-1] = (size, path)
+                    largest.sort(reverse=True)
+        print("read", csv_path.name, seen, flush=True)
 
 
-def ranked(counter_n, counter_b, limit=None):
-    items = sorted(counter_n, key=lambda k: (-counter_b[k], -counter_n[k], k))
-    if limit:
-        items = items[:limit]
-    out = []
-    for key in items:
-        n, b = counter_n[key], counter_b[key]
-        out.append((key, f"{n:,}", tb(b), "%.1f%%" % (100 * n / files), "%.1f%%" % (100 * b / total if total else 0)))
-    return out
+    def tb(n):
+        return "%.2f TB" % (n / 1024 ** 4) if n >= 1024 ** 4 else "%.2f GB" % (n / 1024 ** 3)
 
 
-sections = []
-sections.append("<h2>总览</h2><ul><li>文件数：%s</li><li>总体积：%s（%s 字节）</li><li>空文件：%s</li><li>无扩展名：%s</li><li>扩展名种类：%s</li><li>一级目录数：%s</li></ul>" % (
-    f"{files:,}", tb(total), f"{total:,}", f"{empty:,}", f"{noext:,}", f"{len(ext_n):,}", f"{len(dir_n):,}"))
-sections.append("<h2>格式大类</h2><p>按扩展名归类。这是文件格式，不是打开正文后的文字型或图片型。</p>" + table(
-    ["大类", "文件数", "体积", "文件数占比", "体积占比"], ranked(group_n, group_b)))
-sections.append("<h2>全部扩展名</h2><p>每一种扩展名都列出。文件数占比是这种扩展名的文件个数除以全部文件数，体积占比是这种扩展名的字节数除以全部字节数。</p>" + table(
-    ["扩展名", "文件数", "体积", "文件数占比", "体积占比"], ranked(ext_n, ext_b)))
-sections.append("<h2>大小分段</h2>" + table(
-    ["分段", "文件数", "体积", "文件数占比", "体积占比"],
-    [(SIZE_LABELS[i], f"{buckets_n[i]:,}", tb(buckets_b[i]), "%.1f%%" % (100 * buckets_n[i] / files), "%.1f%%" % (100 * buckets_b[i] / total if total else 0)) for i in range(7)]))
-sections.append("<h2>一级目录</h2>" + table(
-    ["目录", "文件数", "体积", "文件数占比", "体积占比"], ranked(dir_n, dir_b, 40)))
-year_rows = []
-for key in sorted(year_n, key=lambda item: (item == "未知", item)):
-    n, b = year_n[key], year_b[key]
-    year_rows.append((key, f"{n:,}", tb(b), "%.1f%%" % (100 * n / files), "%.1f%%" % (100 * b / total if total else 0)))
-sections.append("<h2>修改年份</h2>" + table(["年份", "文件数", "体积", "文件数占比", "体积占比"], year_rows))
-sections.append("<h2>文件名与路径关键词</h2><p>一个文件只计入最先匹配到的一类。未出现这些词的归入未识别。</p>" + table(
-    ["场景", "文件数", "体积", "文件数占比", "体积占比"], ranked(scene_n, scene_b)))
-sections.append("<h2>最大的 30 个文件</h2>" + table(
-    ["体积", "路径"], [(tb(size), path) for size, path in largest]))
+    def row_html(cells):
+        return "<tr>" + "".join("<td>%s</td>" % html.escape(str(c)) for c in cells) + "</tr>"
 
-page = (
-    "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>档案清单报告</title>"
-    "<style>body{font-family:sans-serif;margin:32px;color:#222}table{border-collapse:collapse;width:100%;margin:12px 0 28px}th,td{border:1px solid #ddd;padding:6px 8px;text-align:left}th{background:#f4f4f4}td:nth-child(n+2){text-align:right}h1{margin-bottom:0}p.note{color:#555}</style></head><body>"
-    "<h1>档案清单报告</h1><p class=\"note\">数据来自 all_file_lists 的 CSV，只根据路径、扩展名、大小、目录和修改时间统计，没有打开文档正文。</p>"
-    + "\n".join(sections)
-    + "</body></html>"
-)
-(OUT / "inventory_report.html").write_text(page, encoding="utf-8")
-lines = ["files %d" % files, "bytes %d" % total, "empty %d" % empty, "noext %d" % noext, ""]
-lines.append("groups")
-for item in ranked(group_n, group_b):
-    lines.append("\t".join(item))
-lines.append("")
-lines.append("extensions")
-for item in ranked(ext_n, ext_b):
-    lines.append("\t".join(item))
-(OUT / "inventory_report.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
-print("report_ready", OUT / "inventory_report.html", flush=True)
-print("files", files, "bytes", total, flush=True)
+
+    def table(headers, rows):
+        head = "".join("<th>%s</th>" % html.escape(h) for h in headers)
+        body = "".join(row_html(r) for r in rows)
+        return "<table><thead><tr>%s</tr></thead><tbody>%s</tbody></table>" % (head, body)
+
+
+    def ranked(counter_n, counter_b, limit=None):
+        items = sorted(counter_n, key=lambda k: (-counter_b[k], -counter_n[k], k))
+        if limit:
+            items = items[:limit]
+        out = []
+        for key in items:
+            n, b = counter_n[key], counter_b[key]
+            out.append((key, f"{n:,}", tb(b), "%.1f%%" % (100 * n / max(files, 1)), "%.1f%%" % (100 * b / total if total else 0)))
+        return out
+
+
+    sections = []
+    sections.append("<h2>总览</h2><ul><li>文件数：%s</li><li>总体积：%s（%s 字节）</li><li>空文件：%s</li><li>无扩展名：%s</li><li>扩展名种类：%s</li><li>一级目录数：%s</li></ul>" % (
+        f"{files:,}", tb(total), f"{total:,}", f"{empty:,}", f"{noext:,}", f"{len(ext_n):,}", f"{len(dir_n):,}"))
+    sections.append("<h2>格式大类</h2><p>按扩展名归类。这是文件格式，不是打开正文后的文字型或图片型。</p>" + table(
+        ["大类", "文件数", "体积", "文件数占比", "体积占比"], ranked(group_n, group_b)))
+    sections.append("<h2>全部扩展名</h2><p>每一种扩展名都列出。文件数占比是这种扩展名的文件个数除以全部文件数，体积占比是这种扩展名的字节数除以全部字节数。</p>" + table(
+        ["扩展名", "文件数", "体积", "文件数占比", "体积占比"], ranked(ext_n, ext_b)))
+    sections.append("<h2>大小分段</h2>" + table(
+        ["分段", "文件数", "体积", "文件数占比", "体积占比"],
+        [(SIZE_LABELS[i], f"{buckets_n[i]:,}", tb(buckets_b[i]), "%.1f%%" % (100 * buckets_n[i] / max(files, 1)), "%.1f%%" % (100 * buckets_b[i] / total if total else 0)) for i in range(7)]))
+    sections.append("<h2>一级目录</h2>" + table(
+        ["目录", "文件数", "体积", "文件数占比", "体积占比"], ranked(dir_n, dir_b, 40)))
+    year_rows = []
+    for key in sorted(year_n, key=lambda item: (item == "未知", item)):
+        n, b = year_n[key], year_b[key]
+        year_rows.append((key, f"{n:,}", tb(b), "%.1f%%" % (100 * n / max(files, 1)), "%.1f%%" % (100 * b / total if total else 0)))
+    sections.append("<h2>修改年份</h2>" + table(["年份", "文件数", "体积", "文件数占比", "体积占比"], year_rows))
+    sections.append("<h2>文件名与路径关键词</h2><p>一个文件只计入最先匹配到的一类。未出现这些词的归入未识别。</p>" + table(
+        ["场景", "文件数", "体积", "文件数占比", "体积占比"], ranked(scene_n, scene_b)))
+    sections.append("<h2>最大的 30 个文件</h2>" + table(
+        ["体积", "路径"], [(tb(size), path) for size, path in largest]))
+
+    page = (
+        "<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>档案清单报告</title>"
+        "<style>body{font-family:sans-serif;margin:32px;color:#222}table{border-collapse:collapse;width:100%;margin:12px 0 28px}th,td{border:1px solid #ddd;padding:6px 8px;text-align:left}th{background:#f4f4f4}td:nth-child(n+2){text-align:right}h1{margin-bottom:0}p.note{color:#555}</style></head><body>"
+        "<h1>档案清单报告</h1><p class=\"note\">数据来自 all_file_lists 的 CSV，只根据路径、扩展名、大小、目录和修改时间统计，没有打开文档正文。</p>"
+        + "\n".join(sections)
+        + "</body></html>"
+    )
+    (OUT / "inventory_report.html").write_text(page, encoding="utf-8")
+    lines = ["files %d" % files, "bytes %d" % total, "empty %d" % empty, "noext %d" % noext, ""]
+    lines.append("groups")
+    for item in ranked(group_n, group_b):
+        lines.append("\t".join(item))
+    lines.append("")
+    lines.append("extensions")
+    for item in ranked(ext_n, ext_b):
+        lines.append("\t".join(item))
+    (OUT / "inventory_report.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print("report_ready", OUT / "inventory_report.html", flush=True)
+    print("files", files, "bytes", total, flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
