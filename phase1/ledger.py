@@ -93,7 +93,29 @@ def make_engine(url: str) -> Engine:
             conn.exec_driver_sql("BEGIN IMMEDIATE")
 
         return engine
-    return create_engine(url, pool_pre_ping=True, pool_size=5, max_overflow=5)
+    return create_engine(url, pool_pre_ping=True, pool_size=5, max_overflow=5, connect_args=PG_CONNECT_ARGS)
+
+
+PG_CONNECT_ARGS = {"connect_timeout": 10, "keepalives": 1, "keepalives_idle": 60, "keepalives_interval": 10,
+                   "keepalives_count": 5}
+
+
+def wait_for_db(engine: Engine, timeout_s: float | None = None) -> None:
+    """数据库重启、容器先后启动时等它起来，而不是直接退出。超时后抛出最后一次的错误。"""
+    if timeout_s is None:
+        timeout_s = float(os.environ.get("DB_WAIT_S", "180"))
+    deadline = time.monotonic() + timeout_s
+    delay = 1.0
+    while True:
+        try:
+            with engine.connect() as conn:
+                conn.exec_driver_sql("SELECT 1")
+            return
+        except Exception:  # noqa: BLE001 连不上的原因很多，统一重试到超时
+            if time.monotonic() + delay > deadline:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 15.0)
 
 
 def ensure_schema(engine: Engine) -> None:
@@ -103,6 +125,7 @@ def ensure_schema(engine: Engine) -> None:
         return
     from backend.migrate import apply_migrations
 
+    wait_for_db(engine)
     raw = engine.raw_connection()
     try:
         dbapi = raw.driver_connection if hasattr(raw, "driver_connection") else raw.connection

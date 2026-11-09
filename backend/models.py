@@ -92,8 +92,11 @@ class ArchiveExecution(Base):
 
 
 def make_engine(url: str):
-    connect_args = {"check_same_thread": False} if url.startswith("sqlite") else {}
-    return create_engine(url, connect_args=connect_args, future=True)
+    if url.startswith("sqlite"):
+        return create_engine(url, connect_args={"check_same_thread": False}, future=True)
+    from phase1.ledger import PG_CONNECT_ARGS
+
+    return create_engine(url, connect_args=PG_CONNECT_ARGS, pool_pre_ping=True, future=True)
 
 
 def make_session(engine):
