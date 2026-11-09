@@ -3,6 +3,17 @@ from classifier.config import Thresholds
 from classifier.gate import rule_scores
 
 
+def _resolve_pick(res: dict, ids: list[str], descs: list[str]) -> str:
+    """大模型可能回 ID，也可能回说明原文。两种都映射回 ID；对不上就原样返回，由调用方拒绝。"""
+    pick = (res.get("choice") or "").strip()
+    if pick in ids or pick == "UNCERTAIN" or not pick:
+        return pick
+    for cid, desc in zip(ids, descs):
+        if pick == desc.strip():
+            return cid
+    return pick
+
+
 def _top2(scores: dict) -> tuple[str, float, str, float]:
     r = sorted(scores.items(), key=lambda x: -x[1])
     a, b = r[0], (r[1] if len(r) > 1 else (None, 0.0))
@@ -26,11 +37,11 @@ def classify_l1(query: str, labeled: dict[str, str] | list[str], emb, llm, th: T
         return {"level1": top, "source": "BGE_DIRECT", "scores": scores, "margin": margin,
                 "reason": "clear"}
     try:
-        res = llm.choose(query, descs, allow_uncertain=True)
+        res = llm.choose(query, ids, allow_uncertain=True, descriptions=dict(zip(ids, descs)))
     except Exception as e:
         return {"level1": None, "source": "MANUAL", "reason": f"llm_error: {e}",
                 "scores": scores, "margin": margin}
-    pick = (res.get("choice") or "").strip()
+    pick = _resolve_pick(res, ids, descs)
     if pick == "UNCERTAIN" or not pick:
         return {"level1": None, "source": "MANUAL", "reason": "llm_uncertain",
                 "scores": scores, "margin": margin}
@@ -75,11 +86,12 @@ def classify_l2(query: str, parent: str, children: list[dict], emb, reranker, ll
     top3 = sorted(rscores.items(), key=lambda x: -x[1])[:3]
     opts = [i for i, _ in top3]
     try:
-        res = llm.choose(query, opts, allow_uncertain=True)
+        res = llm.choose(query, opts, allow_uncertain=True,
+                         descriptions={i: descs[ids.index(i)] for i in opts})
     except Exception as e:
         return {"level2": None, "source": "MANUAL", "reason": f"llm_error: {e}",
                 "scores": rscores, "margin": margin, "top3": opts}
-    pick = (res.get("choice") or "").strip()
+    pick = _resolve_pick(res, opts, [descs[ids.index(i)] for i in opts])
     if pick == "UNCERTAIN" or not pick:
         return {"level2": None, "source": "MANUAL", "reason": "llm_uncertain",
                 "scores": rscores, "margin": margin, "top3": opts}

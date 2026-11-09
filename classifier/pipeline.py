@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 from classifier.config import Thresholds
 from classifier.knowledge import load_taxonomy
 from classifier.evidence import route_evidence
@@ -7,7 +8,9 @@ from classifier.levels import classify_l1, classify_l2
 from classifier.verify import verify
 from classifier.review import AutoReviewer
 
-TAXONOMY_PATH = "contracts/taxonomy.yaml"
+# 旧版 v1 类目（25 个二级），只给 /results 这条旧接口和它的测试用。阶段一归档走 taxonomy_v3。
+TAXONOMY_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                             "contracts", "taxonomy.yaml")
 
 
 class ClassificationPipeline:
@@ -107,8 +110,10 @@ class ClassificationPipeline:
         if retry["result_type"] == "FAILED":
             return retry
         retry["result_type"] = "UNRESOLVED"
-        retry["level1"] = out["level1"]
+        retry["level1"] = None
         retry["level2"] = None
+        retry["classification_basis"] = {**(retry.get("classification_basis") or {}),
+                                         "level1_hint": out["level1"]}
         retry["reason"] = "verify_conflict"
         return retry
 

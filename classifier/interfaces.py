@@ -14,4 +14,5 @@ class RerankerBackend(Protocol):
 
 class LLMJudge(Protocol):
     prompt_version: str
-    def choose(self, evidence: str, options: list[str], allow_uncertain: bool = True) -> dict: ...
+    def choose(self, evidence: str, options: list[str], allow_uncertain: bool = True,
+               descriptions: dict[str, str] | None = None) -> dict: ...
