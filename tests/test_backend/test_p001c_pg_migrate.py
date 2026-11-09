@@ -32,6 +32,7 @@ ALLOWED_TABLES = {
     "file_registry",
     "file_content_versions",
     "processing_tasks",
+    "phase1_files",
     "schema_migrations",
 }
 REQUIRED_TABLES = ALLOWED_TABLES
@@ -56,6 +57,8 @@ def _settings():
     database = os.environ.get("PDFCLS_TEST_PGDATABASE", "")
     user = os.environ.get("PDFCLS_TEST_PGUSER", "")
     password = os.environ.get("PDFCLS_TEST_PGPASSWORD", "")
+    if not any((host, port, database, user, password)):
+        pytest.skip("没有配置隔离测试库（PDFCLS_TEST_PG*），跳过 PostgreSQL 迁移测试")
     if database == "app_test" or user == "app_user":
         pytest.fail("拒绝连接云端开发库 app_test / app_user")
     if (host, port, database) != ("127.0.0.1", "15432", "pdf_classification_test"):
@@ -210,6 +213,7 @@ def test_migration_chain_on_isolated_postgres(proof):
         "001_init.sql",
         "002_archive.sql",
         "003_registry.sql",
+        "004_phase1_ledger.sql",
     ]
     assert proof["applied_second"] == []
     assert proof["versions"] == proof["applied_first"]
@@ -710,5 +714,45 @@ def test_business_rows_rolled_back(tx):
         cur.execute("SELECT count(*) FROM schema_migrations")
         versions = cur.fetchone()[0]
     print("COUNTS_AFTER", counts, "SCHEMA_MIGRATIONS", versions)
-    assert versions == 3
+    assert versions == 4
     assert all(n == 0 for n in counts.values()), counts
+
+
+def test_phase1_ledger_on_postgres(proof):
+    """台账在真 PostgreSQL 上：SKIP LOCKED 并发领取不重复、done 行缺归档事实被约束拒绝。"""
+    import threading
+
+    from sqlalchemy import text
+
+    from phase1 import ledger
+
+    host, port, database, user, password = _settings()
+    url = f"postgresql+psycopg2://{user}:{password}@{host}:{port}/{database}"
+    engine = ledger.make_engine(url)
+    ledger.ensure_schema(engine)
+    try:
+        rows = [{"source_path": f"/src/{i:05d}.pdf"} for i in range(400)]
+        assert ledger.load_masters(engine, rows)["inserted"] == 400
+        assert ledger.load_masters(engine, rows)["inserted"] == 0
+        seen: list[int] = []
+        lock = threading.Lock()
+
+        def grab(owner):
+            while True:
+                got = ledger.claim(engine, "cpu", owner, 7, lease_s=60)
+                if not got:
+                    return
+                with lock:
+                    seen.extend(r["id"] for r in got)
+
+        threads = [threading.Thread(target=grab, args=(f"w{i}",)) for i in range(6)]
+        [t.start() for t in threads]
+        [t.join() for t in threads]
+        assert len(seen) == 400 and len(set(seen)) == 400
+        with pytest.raises(Exception):
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE phase1_files SET stage = 'done' WHERE id = :id"), {"id": seen[0]})
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM phase1_files"))
+        engine.dispose()

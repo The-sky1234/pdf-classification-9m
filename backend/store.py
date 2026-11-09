@@ -51,7 +51,7 @@ def save_result(db: Session, payload: dict) -> ClassificationResult:
         "task_id", "file_path", "file_hash", "result_type", "relevance_status",
         "evidence_mode", "level1", "level2", "candidate_scores", "decision_source",
         "classification_basis", "model_version", "taxonomy_version", "prompt_version",
-        "retry_count", "error")} )
+        "retry_count", "error", "reason")} )
     db.add(r)
     db.commit()
     db.refresh(r)
@@ -78,9 +78,20 @@ def query_results(db: Session, result_type: str | None = None, level1: str | Non
 
 
 def apply_review(db: Session, rid: int, patch: dict) -> ClassificationResult | None:
+    """旧 /results 流程的复核，类目按 v1（contracts/taxonomy.yaml）校验。非法组合抛 ValueError。"""
     r = db.get(ClassificationResult, rid)
     if not r or r.result_type != "MANUAL_REVIEW":
         return None
+    l1, l2 = patch.get("level1"), patch.get("level2")
+    if l1 or l2:
+        from classifier.knowledge import load_taxonomy
+        from classifier.pipeline import TAXONOMY_PATH
+
+        kb = load_taxonomy(TAXONOMY_PATH)
+        if l1 not in kb["l2_by_l1"]:
+            raise ValueError(f"unknown level1: {l1}")
+        if l2 is not None and l2 not in kb["l2_by_l1"][l1]:
+            raise ValueError(f"level2 {l2} is not a child of {l1}")
     r.reviewed_by = patch["reviewer"]
     r.reviewed_level1 = patch.get("level1")
     r.reviewed_level2 = patch.get("level2")
