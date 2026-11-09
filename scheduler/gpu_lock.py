@@ -1,7 +1,13 @@
-"""ISSUE-09：跨进程GPU互斥（文件锁O_EXCL+超时回收），禁止用进程内线程锁冒充。"""
+"""跨进程 GPU 互斥（文件锁 O_EXCL + 超时回收），禁止用进程内线程锁冒充。
+
+机器只有一张 NVIDIA RTX A6000，48GB，设备号 0。OCR、MinerU、分类推理必须传同一个
+group，锁文件才是 `gpu-a6000.lock`。分组不同会同时上卡，48GB 不够分给多张卡。
+"""
 from __future__ import annotations
 import os
 import time
+
+GPU_LEASE_GROUP = "a6000"
 
 
 class FileGpuLease:

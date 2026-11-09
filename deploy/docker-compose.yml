@@ -108,12 +108,13 @@ services:
         max-file: "5"
 
   ocr-worker:
+    profiles: ["ocr-wave"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile.ocr
     environment:
       WORKER_ROLE: ocr
-      NVIDIA_VISIBLE_DEVICES: ${OCR_GPUS:-0,1}
+      NVIDIA_VISIBLE_DEVICES: "0"
       REDIS_URL: redis://redis:6379/0
     volumes:
       - ${PDF_ROOT_HOST:?required}:/data/pdfs:ro
@@ -128,7 +129,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: 2
+              device_ids: ["0"]
               capabilities: [gpu]
         limits:
           memory: 48G
@@ -139,12 +140,13 @@ services:
         max-file: "5"
 
   mineru-worker:
+    profiles: ["mineru-wave"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile.mineru
     environment:
       WORKER_ROLE: mineru
-      NVIDIA_VISIBLE_DEVICES: ${MINERU_GPUS:-2}
+      NVIDIA_VISIBLE_DEVICES: "0"
       REDIS_URL: redis://redis:6379/0
     volumes:
       - ${PDF_ROOT_HOST:?required}:/data/pdfs:ro
@@ -160,7 +162,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              device_ids: ["0"]
               capabilities: [gpu]
         limits:
           memory: 64G
@@ -171,12 +173,13 @@ services:
         max-file: "5"
 
   classify-worker:
+    profiles: ["classify-wave"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile.infer
     environment:
       WORKER_ROLE: classify
-      NVIDIA_VISIBLE_DEVICES: ${INFER_GPUS:-3}
+      NVIDIA_VISIBLE_DEVICES: "0"
       REDIS_URL: redis://redis:6379/0
       API_URL: ${API_URL:?required}
       API_KEY: ${API_KEY:?required}
@@ -195,7 +198,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: 1
+              device_ids: ["0"]
               capabilities: [gpu]
         limits:
           memory: 64G

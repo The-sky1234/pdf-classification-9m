@@ -30,10 +30,12 @@ worker只能读不能写删（另见compose `read_only`说明与§5）。
 
 ```bash
 cd deploy
-./ops.sh start     # 构建+后台启动全部服务
-./ops.sh health    # API+PostgreSQL+Redis+容器状态
-./ops.sh logs api  # 查看服务日志
-./ops.sh restart classify-worker
+./ops.sh start            # 只起 CPU 栈：数据库、Redis、API、parser-worker
+./ops.sh wave-ocr         # 停掉其他 GPU 容器后，只起 PaddleOCR
+./ops.sh wave-classify    # 停掉其他 GPU 容器后，只起 BGE / Reranker
+./ops.sh wave-mineru      # 默认不跑
+./ops.sh health
+./ops.sh logs api
 ./ops.sh stop
 ```
 
@@ -43,9 +45,9 @@ cd deploy
 |---|---|---|---|
 | api | FastAPI | 无 | 2 uvicorn workers，限4核/8G |
 | parser-worker ×8 | 检测+PyMuPDF | 无 | CPU，可调 `CPU_WORKERS` |
-| ocr-worker | PaddleOCR | 0,1 | 独立CUDA11.8容器 |
-| mineru-worker | 复杂版式 | 2 | 独立CUDA12.1容器 |
-| classify-worker | BGE/Reranker/LLM客户端 | 3 | LLM走HTTP，不内置权重 |
+| ocr-worker | PaddleOCR | 0，仅 `ocr-wave` | 扫描页和图片。启动前会停掉另外两个 GPU 容器 |
+| mineru-worker | 复杂版式 | 0，仅 `mineru-wave` | 默认不跑。主路径不依赖它 |
+| classify-worker | BGE/Reranker | 0，仅 `classify-wave` | 大模型仅在显存配额内才调用 |
 | postgres/redis | 存储/队列 | 无 | 持久卷+AOF，healthy才启动依赖方 |
 | prometheus/dcgm | 监控（profile） | — | `docker compose --profile monitoring up -d` |
 

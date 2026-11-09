@@ -26,7 +26,7 @@ git log --oneline -3   # 确认与本地一致
 ## 1. 服务器前置条件
 
 ```bash
-nvidia-smi  # 驱动≥550，4卡可见
+nvidia-smi  # 驱动≥550，必须只看到 1 张 NVIDIA RTX A6000，显存 48GB
 nvcc --version
 docker --version && docker compose version
 docker run --rm --gpus all nvcr.io/nvidia/cuda:12.1.0-base-ubuntu22.04 nvidia-smi
@@ -41,7 +41,7 @@ bash deploy/gpu_check.sh   # PASS全绿、FAIL=0方可继续
 | API_KEY / LLM_API_KEY | 生产随机值，仓库永不留存 |
 | API_URL | 容器内地址，默认`http://api:8000` |
 | PDF_ROOT_HOST | 宿主机PDF根目录（容器`:ro`只读挂载3处，不可改） |
-| OCR_GPUS=0,1 MINERU_GPUS=2 INFER_GPUS=3 | 与architecture GPU分工一致 |
+| GPU | 写死为设备 0 的一张 RTX A6000 48GB。`.env` 里没有卡号变量 |
 | BGE_MODEL/RERANKER_MODEL/LLM_ENDPOINT | 真实模型与网关地址 |
 | THRESHOLDS_CALIBRATED | **必须=0**，签署后才可改为1（ISSUE-07门禁） |
 | CPU_WORKERS | 已废弃（compose不再引用），CPU扩缩用`--scale parser-worker=N` |
@@ -52,17 +52,18 @@ bash deploy/gpu_check.sh   # PASS全绿、FAIL=0方可继续
 
 ```bash
 cd deploy && cp .env.example .env   # 先填好
-./ops.sh start                        # 或分阶段：
-docker compose up -d postgres redis
+./ops.sh start                        # 只起 Postgres、Redis、API、CPU parser-worker
 docker compose exec -T postgres pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
 docker compose exec -T redis redis-cli ping
-docker compose up -d api && sleep 8
 curl -H "X-API-Key: $API_KEY" http://127.0.0.1:${API_PORT:-8000}/taxonomy
-docker compose up -d parser-worker ocr-worker mineru-worker classify-worker
+# GPU 一次只开一个波次。下面三条不要并行：
+./ops.sh wave-ocr        # 先停其他 GPU 容器，再只起 PaddleOCR
+./ops.sh wave-classify   # 先停其他 GPU 容器，再只起 BGE / Reranker
+./ops.sh wave-mineru     # 默认不跑。仅在单独批准一批复杂 PDF 之后使用
 ./ops.sh health
 ```
 
-`classify-worker`启动即校验`API_KEY/API_URL`，缺失直接SystemExit（ISSUE-02）。
+`classify-worker` 启动即校验 `API_KEY` / `API_URL`，缺失直接退出。它挂在 profile `classify-wave` 上，`./ops.sh start` 不会把它拉起来。
 
 ## 4. 挂载与持久化验证
 
@@ -74,8 +75,8 @@ docker exec pdf-classification-ocr-worker-1 ls /data/payloads /data/locks  # wor
 docker volume inspect pdf-classification_modelcache pdf-classification_pgdata
 ```
 
-队列只传`file://`引用（<2000B），全文禁入Redis；GPU锁文件`gpu-{ocr,mineru,infer}.lock`
-同目录跨进程互斥，崩溃由stale超时回收。
+队列只传`file://`引用（<2000B），全文禁入Redis。OCR、MinerU、分类共用一把锁
+`gpu-a6000.lock`，同一时刻只有一个任务占这张 48GB 卡。崩溃由 stale 超时回收。
 
 ## 5. 20～100份真实PDF端到端试跑
 

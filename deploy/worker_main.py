@@ -38,13 +38,13 @@ def require_env(name: str) -> str:
 def build_handlers(role: str):
     from scheduler.queue import RedisQueue
     from scheduler.handoff import FilePayloadStore
-    from scheduler.gpu_lock import FileGpuLease
+    from scheduler.gpu_lock import GPU_LEASE_GROUP, FileGpuLease
     from scheduler.pipeline import Pipeline
     q = RedisQueue(REDIS_URL or "redis://redis:6379/0")
     store = FilePayloadStore(PAYLOAD_DIR)
     if role in ("parser", "ocr", "mineru"):
         from parser.parser import parse_pdf
-        lease_group = {"parser": None, "ocr": "ocr", "mineru": "mineru"}[role]
+        lease_group = {"parser": None, "ocr": GPU_LEASE_GROUP, "mineru": GPU_LEASE_GROUP}[role]
         kwargs = {}
         if role == "mineru":
             from parser.mineru_adapter import MinerUAdapter
@@ -78,7 +78,7 @@ def build_handlers(role: str):
         def classify_ref(payload: dict) -> dict:
             ref = payload.get("parse_ref", "")
             parsed = store.load(ref) if ref else payload
-            with FileGpuLease(LOCK_DIR, "infer"):
+            with FileGpuLease(LOCK_DIR, GPU_LEASE_GROUP):
                 return clf.run(parsed)
 
         def save_result(res: dict):
