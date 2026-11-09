@@ -1,229 +1,196 @@
-# 900万PDF智能分类系统 — 单机GPU服务器编排（未在真实服务器验证，见README_DEPLOY.md）
-name: pdf-classification
+# 900 万文件阶段一：单机 1×RTX A6000 编排。变量全部来自同目录的 .env（从 .env.example 复制）。
+#
+# 常驻：postgres、api、cpu-worker（波次 0 + 归档）
+# GPU 波次（同一时间只开一个，ops.sh 负责切换；就算误开两个，也会在 /data/locks/gpu_0.lock 上排队）：
+#   --profile ocr       ocr-worker       波次 1，PaddleOCR
+#   --profile classify  classify-worker  波次 2，bge-m3 + reranker
+#   --profile monitoring prometheus、dcgm-exporter
+#
+# 源目录、归档根按宿主机原路径挂进容器，台账里记的路径在宿主机上可以直接打开。
+name: pdfcls
+
+x-db-url: &db_url postgresql+psycopg2://${POSTGRES_USER:?}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:?}
+
+x-worker: &worker
+  user: "${APP_UID:-10001}:${APP_GID:-10001}"
+  restart: unless-stopped
+  stop_grace_period: 90s
+  healthcheck:
+    disable: true
+  depends_on:
+    postgres:
+      condition: service_healthy
+  logging:
+    driver: json-file
+    options: {max-size: 200m, max-file: "5"}
+
+x-worker-env: &worker_env
+  DATABASE_URL: *db_url
+  SOURCE_ROOTS: ${SOURCE_ROOT:?}
+  ARCHIVE_ROOT: ${ARCHIVE_ROOT:?}
+  LOCK_DIR: /data/locks
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+x-gpu: &gpu
+  devices:
+    - driver: nvidia
+      device_ids: ["${GPU_DEVICE:-0}"]
+      capabilities: [gpu]
 
 services:
   postgres:
     image: postgres:16-bookworm
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:?required}
-      POSTGRES_USER: ${POSTGRES_USER:?required}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      POSTGRES_DB: ${POSTGRES_DB:?}
+      POSTGRES_USER: ${POSTGRES_USER:?}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${PG_SHARED_BUFFERS:-4GB}
+      - -c
+      - effective_cache_size=${PG_EFFECTIVE_CACHE:-12GB}
+      - -c
+      - work_mem=32MB
+      - -c
+      - maintenance_work_mem=1GB
+      - -c
+      - max_connections=200
+      - -c
+      - max_wal_size=8GB
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - autovacuum_vacuum_scale_factor=0.02
+      - -c
+      - autovacuum_analyze_scale_factor=0.01
+    shm_size: 1g
     volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ../backend/migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+      - ${PG_DATA_DIR:?}:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${PG_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 15s
+      interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: "4"
-          memory: 16G
+    stop_grace_period: 60s
     logging:
       driver: json-file
-      options:
-        max-size: 100m
-        max-file: "5"
-
-  redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "${REDIS_MAXMEMORY:-4gb}", "--maxmemory-policy", "noeviction"]
-    volumes:
-      - redisdata:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: "2"
-          memory: 6G
-    logging:
-      driver: json-file
-      options:
-        max-size: 100m
-        max-file: "5"
+      options: {max-size: 100m, max-file: "5"}
 
   api:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.api
+      args: {PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"}
+    image: pdfcls-api:${IMAGE_TAG:-latest}
+    user: "${APP_UID:-10001}:${APP_GID:-10001}"
     environment:
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:?required}:${POSTGRES_PASSWORD:?required}@postgres:5432/${POSTGRES_DB:?required}
-      API_KEY: ${API_KEY:?required}
+      DATABASE_URL: *db_url
+      API_KEY: ${API_KEY:?}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ${DATA_DIR:?}/exports:/data/exports
     depends_on:
       postgres:
-        condition: service_healthy
-      redis:
         condition: service_healthy
     ports:
-      - "${API_PORT:-8000}:8000"
+      - "${API_BIND:-127.0.0.1}:${API_PORT:-8000}:8000"
     restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: "4"
-          memory: 8G
     logging:
       driver: json-file
-      options:
-        max-size: 100m
-        max-file: "5"
+      options: {max-size: 100m, max-file: "5"}
 
-  parser-worker:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.api
-    command: ["python", "deploy_worker_main.py"]
+  cpu-worker:
+    <<: *worker
+    image: pdfcls-api:${IMAGE_TAG:-latest}
+    command: ["python", "-m", "phase1", "work", "--stage", "cpu", "--stage", "archive",
+              "--procs", "${CPU_PROCS:-16}"]
     environment:
-      WORKER_ROLE: parser
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:?required}:${POSTGRES_PASSWORD:?required}@postgres:5432/${POSTGRES_DB:?required}
-      REDIS_URL: redis://redis:6379/0
-      PDF_ROOT: /data/pdfs
+      <<: *worker_env
     volumes:
-      - ${PDF_ROOT_HOST:?required}:/data/pdfs:ro
-      - workdata:/data:rw
+      - ${SOURCE_ROOT:?}:${SOURCE_ROOT:?}:ro
+      - ${ARCHIVE_ROOT:?}:${ARCHIVE_ROOT:?}
+      - ${DATA_DIR:?}/locks:/data/locks
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-    deploy:
-      # CPU扩缩容：compose up --scale parser-worker=N（replicas仅swarm有效）
-      resources:
-        limits:
-          cpus: "2"
-          memory: 6G
-    logging:
-      driver: json-file
-      options:
-        max-size: 200m
-        max-file: "5"
+      api:
+        condition: service_started
 
   ocr-worker:
-    profiles: ["ocr-wave"]
+    <<: *worker
+    profiles: ["ocr"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile.ocr
+      args: {PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"}
+    image: pdfcls-ocr:${IMAGE_TAG:-latest}
+    command: ["python", "-m", "phase1", "work", "--stage", "ocr", "--procs", "${OCR_PROCS:-3}"]
     environment:
-      WORKER_ROLE: ocr
-      NVIDIA_VISIBLE_DEVICES: "0"
-      REDIS_URL: redis://redis:6379/0
+      <<: *worker_env
+      OCR_USE_GPU: "1"
+      OCR_DPI: ${OCR_DPI:-200}
+      FLAGS_allocator_strategy: auto_growth
     volumes:
-      - ${PDF_ROOT_HOST:?required}:/data/pdfs:ro
-      - workdata:/data:rw
-      - modelcache:/root/.paddleocr:rw
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
+      - ${SOURCE_ROOT:?}:${SOURCE_ROOT:?}:ro
+      - ${DATA_DIR:?}/locks:/data/locks
+      - ${MODEL_DIR:?}/paddleocr:/home/app/.paddleocr
+    shm_size: 4g
     deploy:
       resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["0"]
-              capabilities: [gpu]
-        limits:
-          memory: 48G
-    logging:
-      driver: json-file
-      options:
-        max-size: 200m
-        max-file: "5"
-
-  mineru-worker:
-    profiles: ["mineru-wave"]
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.mineru
-    environment:
-      WORKER_ROLE: mineru
-      NVIDIA_VISIBLE_DEVICES: "0"
-      REDIS_URL: redis://redis:6379/0
-    volumes:
-      - ${PDF_ROOT_HOST:?required}:/data/pdfs:ro
-      - workdata:/data:rw
-      - modelcache:/root/.cache:rw
-      - workdata:/data:rw
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["0"]
-              capabilities: [gpu]
-        limits:
-          memory: 64G
-    logging:
-      driver: json-file
-      options:
-        max-size: 200m
-        max-file: "5"
+        reservations: *gpu
 
   classify-worker:
-    profiles: ["classify-wave"]
+    <<: *worker
+    profiles: ["classify"]
     build:
       context: ..
       dockerfile: deploy/Dockerfile.infer
+      args: {PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"}
+    image: pdfcls-infer:${IMAGE_TAG:-latest}
+    command: ["python", "-m", "phase1", "work", "--stage", "classify", "--procs", "${CLASSIFY_PROCS:-1}"]
     environment:
-      WORKER_ROLE: classify
-      NVIDIA_VISIBLE_DEVICES: "0"
-      REDIS_URL: redis://redis:6379/0
-      API_URL: ${API_URL:?required}
-      API_KEY: ${API_KEY:?required}
-      BGE_MODEL: ${BGE_MODEL:-BAAI/bge-m3}
-      RERANKER_MODEL: ${RERANKER_MODEL:-BAAI/bge-reranker-v2-m3}
-      LLM_ENDPOINT: ${LLM_ENDPOINT:?required}
-      LLM_API_KEY: ${LLM_API_KEY:?required}
+      <<: *worker_env
+      # 分类只读台账里的证据文字，不挂源目录，也就不检查它
+      SOURCE_ROOTS: ""
+      MODEL_DEVICE: cuda
+      EMBED_MODEL: ${EMBED_MODEL:-BAAI/bge-m3}
+      RERANK_MODEL: ${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      THRESHOLDS_FILE: ${THRESHOLDS_FILE:-}
+      LLM_ENDPOINT: ${LLM_ENDPOINT:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_MAX_CALLS: ${LLM_MAX_CALLS:-0}
     volumes:
-      - modelcache:/root/.cache:rw
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
+      - ${DATA_DIR:?}/locks:/data/locks
+      - ${DATA_DIR:?}/config:/config:ro
+      - ${MODEL_DIR:?}/hf:/models/hf
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    shm_size: 4g
     deploy:
       resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["0"]
-              capabilities: [gpu]
-        limits:
-          memory: 64G
-    logging:
-      driver: json-file
-      options:
-        max-size: 200m
-        max-file: "5"
+        reservations: *gpu
 
   prometheus:
-    image: prom/prometheus:v2.52.0
+    profiles: ["monitoring"]
+    image: prom/prometheus:v2.53.2
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - promdata:/prometheus
     ports:
-      - "${PROM_PORT:-9090}:9090"
+      - "127.0.0.1:${PROM_PORT:-9090}:9090"
     restart: unless-stopped
-    profiles: [monitoring]
 
   dcgm-exporter:
-    image: nvcr.io/nvidia/k8s/dcgm-exporter:3.3.5-3.6.0-ubuntu22.04
-    environment:
-      NVIDIA_VISIBLE_DEVICES: all
+    profiles: ["monitoring"]
+    image: nvcr.io/nvidia/k8s/dcgm-exporter:3.3.7-3.5.0-ubuntu22.04
+    cap_add: [SYS_ADMIN]
     ports:
-      - "9400:9400"
+      - "127.0.0.1:9400:9400"
     restart: unless-stopped
     deploy:
       resources:
@@ -232,11 +199,6 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    profiles: [monitoring]
 
 volumes:
-  pgdata:
-  redisdata:
-  modelcache:
   promdata:
-  workdata:

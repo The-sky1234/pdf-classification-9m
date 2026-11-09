@@ -1,0 +1,5 @@
+# API + CPU 波次 + 归档（Dockerfile.api）
+-r requirements-common.txt
+fastapi==0.143.0
+uvicorn==0.54.0
+pydantic==2.14.0

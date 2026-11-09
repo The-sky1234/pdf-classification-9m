@@ -1,0 +1,11 @@
+# OCR 波次（Dockerfile.ocr，CUDA 11.8 + cuDNN 8，Python 3.10）
+# PyPI 上的 paddlepaddle-gpu 2.6.2 就是 CUDA 11.8 / cuDNN 8.6 编译的。
+-r requirements-common.txt
+paddlepaddle-gpu==2.6.2
+paddleocr==2.8.1
+numpy==1.26.4
+# 4.12 起要求 numpy>=2，paddle 2.6 跑不起来
+opencv-python==4.11.0.86
+opencv-contrib-python==4.11.0.86
+# paddle 2.6 运行时会 import paddle.utils.cpp_extension，依赖 setuptools；75 以后删了它要的接口
+setuptools<75

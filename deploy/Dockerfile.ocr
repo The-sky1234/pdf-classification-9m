@@ -1,17 +1,23 @@
-# OCR worker：PaddleGPU独立环境（CUDA 11.8 / cuDNN8 / Python3.10，Paddle官方基线）
-FROM nvcr.io/nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends python3.10 python3-pip libgomp1 libgl1 \
- && rm -rf /var/lib/apt/lists/*
+# OCR 波次：PaddleOCR 2.8.1 + paddlepaddle-gpu 2.6.2（CUDA 11.8 / cuDNN 8，Python 3.10）。
+# 模型不打进镜像，挂在 ${MODEL_DIR}/paddleocr → /home/app/.paddleocr，用 ops.sh fetch-models 预先下载。
+FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
+ARG PIP_INDEX_URL=https://pypi.org/simple
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PIP_INDEX_URL=${PIP_INDEX_URL} \
+    DEBIAN_FRONTEND=noninteractive HOME=/home/app
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3.10 python3-pip libgomp1 libgl1 libglib2.0-0 \
+ && rm -rf /var/lib/apt/lists/* \
+ && ln -sf /usr/bin/python3.10 /usr/local/bin/python
 WORKDIR /srv/app
-COPY scheduler/requirements.txt ./sched-req.txt
-RUN pip3 install -r sched-req.txt "paddlepaddle-gpu==2.6.*" "paddleocr>=2.7" pymupdf
-COPY parser ./parser
-COPY scheduler ./scheduler
+COPY deploy/requirements-common.txt deploy/requirements-ocr.txt ./deploy/
+RUN python -m pip install --upgrade "pip<25" && python -m pip install -r deploy/requirements-ocr.txt
+COPY backend ./backend
 COPY classifier ./classifier
 COPY contracts ./contracts
-COPY deploy/worker_main.py ./deploy_worker_main.py
-RUN useradd -m -u 10001 app && chown -R app /srv/app
+COPY parser ./parser
+COPY phase1 ./phase1
+COPY scheduler ./scheduler
+COPY deploy/fetch_models.py ./deploy/
+RUN useradd -m -u 10001 app && chmod 1777 /home/app
 USER app
-ENV WORKER_ROLE=ocr
-CMD ["python3", "deploy_worker_main.py"]
+CMD ["python", "-m", "phase1", "work", "--stage", "ocr"]
