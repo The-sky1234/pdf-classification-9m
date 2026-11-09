@@ -18,6 +18,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 [ -f .env ] || { echo "缺少 deploy/.env：cp .env.example .env 后按注释填写"; exit 2; }
+# Windows 记事本保存的 .env 带 \r，读进来每个值都会多一个回车
+if grep -q $'\r' .env; then sed -i 's/\r$//' .env; fi
 set -a
 # shellcheck disable=SC1091
 . ./.env
