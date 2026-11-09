@@ -1,6 +1,6 @@
 -- 002_archive.sql
 -- 本文件此前未入库，测试库上一次执行因 archive_decisions 不存在而整段回滚。
--- 这里改为先创建归档决策/执行表，再补列、唯一索引和 CHECK，语句可重入。
+-- 这里改为先创建归档决策/执行表，再补列、约束，最后写注释，语句可重入。
 -- 重复执行的权威保护是 schema_migrations，不靠静默忽略错误。
 -- file_id 使用 TEXT，不用 PostgreSQL uuid。新 ID 为 UUIDv7 字符串；
 -- 旧历史 ID 可为非 UUIDv7 字符串。本脚本不对 file_id 加“必须是 UUIDv7”的 CHECK。
@@ -26,15 +26,6 @@ CREATE TABLE IF NOT EXISTS archive_decisions (
   CONSTRAINT chk_archdec_content_version CHECK (content_version IS NULL OR content_version >= 1)
 );
 
-COMMENT ON TABLE archive_decisions IS
-  '某一决策版本的唯一主目录。version 是决策版本。content_version 是该判决所依据的源字节版本，二者不是同一序列。';
-COMMENT ON COLUMN archive_decisions.file_id IS
-  'TEXT 字符串。新 ID 为 UUIDv7（36 位小写、带连字符）。旧历史 ID 可为非 UUIDv7 字符串（既有台账为 32 位小写十六进制）。禁止改成 PostgreSQL uuid。';
-COMMENT ON COLUMN archive_decisions.content_version IS
-  '写出该决策时所依据的 file_content_versions.content_version。003 设为 NOT NULL 并外键到该版本行，不指向会被后续扫描改写的 processing_tasks 当前行。';
-COMMENT ON COLUMN archive_decisions.version IS
-  '决策版本。UNIQUE(file_id, version)。复核改类写 version+1，不覆盖本行。';
-
 ALTER TABLE archive_decisions ADD COLUMN IF NOT EXISTS reason TEXT;
 ALTER TABLE archive_decisions ADD COLUMN IF NOT EXISTS target_dir TEXT;
 ALTER TABLE archive_decisions ADD COLUMN IF NOT EXISTS source_sha256 CHAR(64);
@@ -46,6 +37,39 @@ ALTER TABLE archive_decisions ADD COLUMN IF NOT EXISTS target_sha256 CHAR(64);
 ALTER TABLE archive_decisions ADD COLUMN IF NOT EXISTS archive_type TEXT;
 ALTER TABLE archive_decisions ADD COLUMN IF NOT EXISTS level1 TEXT;
 ALTER TABLE archive_decisions ADD COLUMN IF NOT EXISTS level2 TEXT;
+
+DO $$
+BEGIN
+  -- 表若是旧版 ORM create_all 建的，CREATE TABLE IF NOT EXISTS 不会补约束，这里补上。
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_archdec_type'
+                 AND conrelid = 'archive_decisions'::regclass) THEN
+    ALTER TABLE archive_decisions ADD CONSTRAINT chk_archdec_type
+      CHECK (archive_type IN ('PATENT', 'LOW_VALUE', 'BUSINESS', 'PENDING'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_archdec_decision_status'
+                 AND conrelid = 'archive_decisions'::regclass) THEN
+    ALTER TABLE archive_decisions ADD CONSTRAINT chk_archdec_decision_status
+      CHECK (decision_status IN ('APPROVED', 'NEED_REVIEW'));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_archdec_approved'
+                 AND conrelid = 'archive_decisions'::regclass) THEN
+    ALTER TABLE archive_decisions ADD CONSTRAINT chk_archdec_approved CHECK (approved IN (0, 1));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_archdec_content_version'
+                 AND conrelid = 'archive_decisions'::regclass) THEN
+    ALTER TABLE archive_decisions ADD CONSTRAINT chk_archdec_content_version
+      CHECK (content_version IS NULL OR content_version >= 1);
+  END IF;
+END $$;
+
+COMMENT ON TABLE archive_decisions IS
+  '某一决策版本的唯一主目录。version 是决策版本。content_version 是该判决所依据的源字节版本，二者不是同一序列。';
+COMMENT ON COLUMN archive_decisions.file_id IS
+  'TEXT 字符串。新 ID 为 UUIDv7（36 位小写、带连字符）。旧历史 ID 可为非 UUIDv7 字符串（既有台账为 32 位小写十六进制）。禁止改成 PostgreSQL uuid。';
+COMMENT ON COLUMN archive_decisions.content_version IS
+  '写出该决策时所依据的 file_content_versions.content_version。003 设为 NOT NULL 并外键到该版本行，不指向会被后续扫描改写的 processing_tasks 当前行。';
+COMMENT ON COLUMN archive_decisions.version IS
+  '决策版本。UNIQUE(file_id, version)。复核改类写 version+1，不覆盖本行。';
 
 CREATE TABLE IF NOT EXISTS archive_executions (
   id SERIAL PRIMARY KEY,
@@ -90,15 +114,6 @@ CREATE TABLE IF NOT EXISTS archive_executions (
   CONSTRAINT chk_archexec_content_version CHECK (content_version IS NULL OR content_version >= 1)
 );
 
-COMMENT ON TABLE archive_executions IS
-  '某一决策版本的复制与校验记录。COMPLETED 必须有目标实体路径、字节大小和 sha256，仅有状态标签不算归档。';
-COMMENT ON COLUMN archive_executions.content_version IS
-  '本执行所依据的源字节版本，003 用复合外键钉死到对应 archive_decisions 的 file_id 与 content_version。';
-COMMENT ON COLUMN archive_executions.target_bytes IS
-  '目标 PDF 实体的字节大小。COMPLETED 缺少路径、target_bytes 或 sha256 时 chk_completed 拒绝。';
-COMMENT ON COLUMN archive_executions.tmp_path IS
-  '同盘临时路径。正式完成只认 final_path 上校验通过的实体。';
-
 ALTER TABLE archive_executions ADD COLUMN IF NOT EXISTS tmp_path TEXT;
 ALTER TABLE archive_executions ADD COLUMN IF NOT EXISTS source_sha256 CHAR(64);
 ALTER TABLE archive_executions ADD COLUMN IF NOT EXISTS target_sha256 CHAR(64);
@@ -111,6 +126,15 @@ ALTER TABLE archive_executions ADD COLUMN IF NOT EXISTS content_version INTEGER;
 ALTER TABLE archive_executions ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ;
 ALTER TABLE archive_executions ADD COLUMN IF NOT EXISTS final_path TEXT;
 ALTER TABLE archive_executions ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'QUEUED';
+
+COMMENT ON TABLE archive_executions IS
+  '某一决策版本的复制与校验记录。COMPLETED 必须有目标实体路径、字节大小和 sha256，仅有状态标签不算归档。';
+COMMENT ON COLUMN archive_executions.content_version IS
+  '本执行所依据的源字节版本，003 用复合外键钉死到对应 archive_decisions 的 file_id 与 content_version。';
+COMMENT ON COLUMN archive_executions.target_bytes IS
+  '目标 PDF 实体的字节大小。COMPLETED 缺少路径、target_bytes 或 sha256 时 chk_completed 拒绝。';
+COMMENT ON COLUMN archive_executions.tmp_path IS
+  '同盘临时路径。正式完成只认 final_path 上校验通过的实体。';
 
 ALTER TABLE classification_results ADD COLUMN IF NOT EXISTS file_id VARCHAR(64);
 ALTER TABLE classification_results ADD COLUMN IF NOT EXISTS version INTEGER DEFAULT 1;
