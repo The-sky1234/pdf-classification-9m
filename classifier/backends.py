@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections import OrderedDict
@@ -169,21 +171,27 @@ class CrossEncoderBackend:
 class LLMHttpBackend:
     """OpenAI 兼容的 /chat/completions（vLLM、Xinference、Ollama 等都行）。
 
-    只许在给定候选里选，或回 UNCERTAIN。超过 max_calls 次以后一律 UNCERTAIN，
-    由上游转人工复核，不会因为大模型不可用而卡住整个波次。
+    只许在给定候选里选，或回 UNCERTAIN。超过 max_calls 次（每个进程从启动起计）以后一律 UNCERTAIN，
+    由上游转人工复核。重试用完仍连不上时熔断 cooldown_s 秒，期间直接报错转人工，不拖慢整个波次。
     """
 
-    prompt_version = "llm-judge-v3"
+    prompt_version = "llm-judge-v4"
 
     def __init__(self, endpoint: str = "", api_key: str = "", model: str = "",
-                 timeout_s: float = 30.0, max_calls: int | None = None):
+                 timeout_s: float | None = None, max_calls: int | None = None, max_tokens: int | None = None,
+                 retries: int = 3, retry_wait_s: float = 2.0, cooldown_s: float | None = None):
         self.endpoint = (endpoint or os.environ.get("LLM_ENDPOINT", "")).rstrip("/")
         self.api_key = api_key or os.environ.get("LLM_API_KEY", "")
         self.model = model or os.environ.get("LLM_MODEL", "")
-        self.timeout_s = timeout_s
+        self.timeout_s = timeout_s if timeout_s is not None else float(os.environ.get("LLM_TIMEOUT_S", "60"))
         limit = max_calls if max_calls is not None else os.environ.get("LLM_MAX_CALLS", "0")
         self.max_calls = int(limit)
+        self.max_tokens = max_tokens if max_tokens is not None else int(os.environ.get("LLM_MAX_TOKENS", "32"))
+        self.retries = retries
+        self.retry_wait_s = retry_wait_s
+        self.cooldown_s = cooldown_s if cooldown_s is not None else float(os.environ.get("LLM_COOLDOWN_S", "300"))
         self.calls = 0
+        self._down_until = 0.0
         self._lock = threading.Lock()
 
     @property
@@ -197,35 +205,90 @@ class LLMHttpBackend:
             self.calls += 1
             return True
 
+    def _refund(self) -> None:
+        with self._lock:
+            self.calls -= 1
+
     def choose(self, evidence: str, options: list[str], allow_uncertain: bool = True,
                descriptions: dict[str, str] | None = None) -> dict:
-        if not self.enabled or not self._budget():
+        if not self.enabled:
             return {"choice": "UNCERTAIN", "reason": "llm_disabled_or_budget_exhausted"}
-        lines = [f"{opt}：{(descriptions or {}).get(opt, '')}".rstrip("：") for opt in options]
-        prompt = (
-            "你是档案分类员。根据文件证据，从候选里选一个最合适的，只回答候选前面的编号原文。"
-            + ("拿不准就回答 UNCERTAIN。" if allow_uncertain else "")
-            + "\n候选：\n" + "\n".join(lines) + "\n\n文件证据：\n" + evidence[:3000]
-        )
+        if time.monotonic() < self._down_until:
+            raise RuntimeError("llm unavailable (cooling down)")
+        if not self._budget():
+            return {"choice": "UNCERTAIN", "reason": "llm_disabled_or_budget_exhausted"}
+        prompt = build_prompt(evidence, options, descriptions or {}, allow_uncertain)
         body = json.dumps({
             "model": self.model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
-            "max_tokens": 32,
+            "max_tokens": self.max_tokens,
         }).encode("utf-8")
-        req = urllib.request.Request(self.endpoint + "/chat/completions", data=body, method="POST",
-                                     headers={"Content-Type": "application/json"})
-        if self.api_key:
-            req.add_header("Authorization", f"Bearer {self.api_key}")
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            answer = data["choices"][0]["message"]["content"].strip()
-        except (urllib.error.URLError, TimeoutError, KeyError, IndexError, ValueError) as exc:
-            raise RuntimeError(f"llm call failed: {exc}") from exc
-        for opt in sorted(options, key=len, reverse=True):
-            if answer == opt or answer.startswith(opt):
-                return {"choice": opt, "reason": "llm"}
-        if "UNCERTAIN" in answer.upper():
+            raw = self._post(body)
+        except RuntimeError:
+            self._refund()
+            raise
+        answer = _strip_thinking(raw)
+        if answer is None:
+            return {"choice": "UNCERTAIN", "reason": "llm_thinking_truncated"}
+        return parse_answer(answer, options, allow_uncertain)
+
+    def _post(self, body: bytes) -> str:
+        """连不上、超时、5xx 重试几次（服务刚启动或重启时）；4xx 和返回格式不对不重试。"""
+        last: Exception | None = None
+        for attempt in range(self.retries + 1):
+            req = urllib.request.Request(self.endpoint + "/chat/completions", data=body, method="POST",
+                                         headers={"Content-Type": "application/json"})
+            if self.api_key:
+                req.add_header("Authorization", f"Bearer {self.api_key}")
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                return (data["choices"][0]["message"]["content"] or "").strip()
+            except urllib.error.HTTPError as exc:
+                last = exc
+                if exc.code < 500:
+                    break
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+                last = exc
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                raise RuntimeError(f"llm call failed: bad response: {exc}") from exc
+            if attempt < self.retries:
+                time.sleep(self.retry_wait_s * (2 ** attempt))
+        if not isinstance(last, urllib.error.HTTPError) or last.code >= 500:
+            self._down_until = time.monotonic() + self.cooldown_s
+        raise RuntimeError(f"llm call failed: {last}") from last
+
+
+def build_prompt(evidence: str, options: list[str], descriptions: dict[str, str], allow_uncertain: bool) -> str:
+    """候选编号 1..N，只让模型回一个数字：7B 级别的模型回类目名时常改写或答成说明里的三级词。"""
+    lines = [f"{i}. {descriptions.get(opt) or opt}" for i, opt in enumerate(options, 1)]
+    tail = f"只输出一个数字（1-{len(options)}）" + ("；都不合适或拿不准就输出 0。" if allow_uncertain else "，必须选一个。")
+    return ("你是应急管理部门的档案分类员。阅读下面的文件内容，判断它最属于哪一个类别。\n类别：\n"
+            + "\n".join(lines) + "\n\n文件内容：\n" + evidence[:3000] + "\n\n" + tail)
+
+
+def parse_answer(answer: str, options: list[str], allow_uncertain: bool) -> dict:
+    for opt in sorted(options, key=len, reverse=True):
+        if answer == opt or answer.startswith(opt):
+            return {"choice": opt, "reason": "llm"}
+    match = re.search(r"(?<![A-Za-z0-9_.])(\d+)(?![A-Za-z0-9_])", answer) if len(answer) <= 16 else None
+    if match:
+        n = int(match.group(1))
+        if 1 <= n <= len(options):
+            return {"choice": options[n - 1], "reason": "llm"}
+        if n == 0 and allow_uncertain:
             return {"choice": "UNCERTAIN", "reason": "llm_uncertain"}
-        return {"choice": answer, "reason": "llm_off_list"}
+    if "UNCERTAIN" in answer.upper() or "拿不准" in answer:
+        return {"choice": "UNCERTAIN", "reason": "llm_uncertain"}
+    return {"choice": answer, "reason": "llm_off_list"}
+
+
+def _strip_thinking(answer: str) -> str | None:
+    """Qwen3、DeepSeek-R1 这类模型先输出 <think>…</think>。思考没写完就被截断时返回 None。"""
+    if "<think>" not in answer:
+        return answer
+    if "</think>" not in answer:
+        return None
+    return answer.rsplit("</think>", 1)[1].strip()

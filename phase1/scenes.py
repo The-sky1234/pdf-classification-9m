@@ -28,6 +28,7 @@ def make_scene_classifier(emb, reranker, llm, thresholds: Thresholds | None = No
             return {**base, "reason": relevance.get("reason") or "relevance_uncertain"}
         level1 = classify_l1(query, labeled, emb, llm, th)
         base["scores"]["l1"] = level1.get("scores", {})
+        base["scores"]["l1_source"] = level1.get("source", "")
         parent = level1.get("level1")
         if not parent:
             return {**base, "reason": level1.get("reason") or "level1_uncertain"}
@@ -38,6 +39,7 @@ def make_scene_classifier(emb, reranker, llm, thresholds: Thresholds | None = No
         ]
         level2 = classify_l2(query, parent, children, emb, reranker, llm, th)
         base["scores"]["l2"] = level2.get("scores", {})
+        base["scores"]["l2_source"] = level2.get("source", "")
         return {
             **base,
             "level1": parent,

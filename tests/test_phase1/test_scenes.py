@@ -45,3 +45,17 @@ def test_scene_descriptions_match_taxonomy():
     for key, names in L2.items():
         assert list(data["l2"][key]) == names
     assert "双随机一公开" in data["l2"]["L1_AQSC"]["消防监管"]
+
+
+class _PickLLM:
+    def choose(self, evidence, options, allow_uncertain=True, descriptions=None):
+        return {"choice": "消防监管" if "消防监管" in options else options[0], "reason": "llm"}
+
+
+def test_llm_decisions_are_marked_in_scores(tmp_path):
+    src = tmp_path / "a.txt"
+    src.write_text("安全生产领域的消防监管检查记录，正文足够长。", encoding="utf-8")
+    th = Thresholds(calibrated=True, l1_direct_min=9.0, l2_direct_min=9.0)
+    done = judge_file(str(src), classify_fn=make_scene_classifier(_Emb(), _Rerank(), _PickLLM(), th))
+    assert done.archive_type == "BUSINESS" and done.level2 == "消防监管"
+    assert done.scores["l1_source"] == "LLM_JUDGE" and done.scores["l2_source"] == "LLM_JUDGE"
