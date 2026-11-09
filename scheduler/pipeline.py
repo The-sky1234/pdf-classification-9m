@@ -42,7 +42,8 @@ class Pipeline:
             rec.status = "DONE"
             return {"task_id": task_id, "status": "DONE", "result": result}
         except Exception as e:
-            code = getattr(e, "code", "UNKNOWN")
+            info = getattr(e, "info", None)
+            code = getattr(info, "code", None) or getattr(e, "code", "UNKNOWN")
             if code in RETRYABLE and rec.retry_count < MAX_RETRIES:
                 rec.retry_count += 1
                 rec.status = "RETRY"

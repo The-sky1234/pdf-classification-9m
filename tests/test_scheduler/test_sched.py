@@ -85,3 +85,24 @@ def test_benchmark_estimate():
     s = Sample(n_files=1000, n_pages=10000, seconds=600.0)
     est = estimate_full_run(s, 9_000_000)
     assert est["total_pages"] == 90_000_000 and "est_days" in est
+
+
+def test_crash_before_ack_is_recovered_and_acked_can_requeue():
+    q = FakeQueue()
+    assert q.enqueue("t1", {"fp": "/a.pdf"})
+    assert q.dequeue()[0] == "t1"
+    assert q.enqueue("t1", {}) is False
+    assert q.recover() == 1 and q.qsize() == 1
+    assert q.dequeue()[0] == "t1"
+    q.ack("t1")
+    assert q.enqueue("t1", {}) is True
+
+
+def test_parse_error_code_is_read_from_info():
+    from parser.errors import ParseError
+
+    def flaky(fp):
+        raise ParseError("RETRYABLE_IO", "nas hiccup", retryable=True)
+
+    out = Pipeline(parse_fn=flaky).run_one("t1", "/x.pdf")
+    assert out["status"] == "RETRY"
